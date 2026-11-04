@@ -1,7 +1,7 @@
 {
-  "version": 20,
+  "version": 21,
   "date": "2026-11-04",
-  "notes": "One slow file can't hold up Clean the Inbox any more: after 3 tries it's set aside for you and the rest get cleaned.",
+  "notes": "Fix a match: See the work has \"Wrong student? Move this file\", and a button to update the class list when a student is missing.",
   "scopes": [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",

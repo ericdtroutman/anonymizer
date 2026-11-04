@@ -61,6 +61,13 @@
  *  is (the tool fills in the names it could read). The name area is painted
  *  white and the page saved as a flat picture, so the name is really gone.
  *  A test where a name still shows up is held back, NOT sent to Claude.
+ * Version 21 (2026-11-04): fixing a match. In See the work, every file has
+ *  "Wrong student?": pick the right student and the file moves to them (its
+ *  grade, review and marks go with it when nothing else is under that code).
+ *  The student list always shows everyone, with a button to update the class
+ *  list from Canvas when someone is missing. Matching no longer leaves the
+ *  page stuck on Loading. Pull updates the class list from Canvas first, so
+ *  new students' work matches by itself.
  * Version 20 (2026-11-04): one slow file can't block the Inbox any more.
  *  Google stops any run after 6 minutes. Before, a file too big to clean in
  *  that time stayed in the Inbox and every Clean started over on it. Now each
@@ -162,7 +169,7 @@
  */
 
 const APP = 'Anonymizer';
-const APP_VERSION = 20;   // Version 17: the app compares this with the newest version from Rowan
+const APP_VERSION = 21;   // Version 17: the app compares this with the newest version from Rowan
 const TAB_ROSTER = 'Roster';
 const TAB_KEY = 'Key';
 const TAB_RESULTS = 'Results';
@@ -1721,6 +1728,7 @@ function pullSubmissionsFor_(asg) {
 function pullSubmissions_(ui, asg) {
   const start = Date.now();
   if (!asg) return;
+  try { updateRoster_('courses/' + asg.course); } catch (e) { /* pull anyway; names may not match */ }   // version 21
   const f = folders_();
   const inbox = folderByName_(f.inbox, asg.name);
   const pulls = ensureSheet_(TAB_PULLS, ['Assignment', 'Canvas ID', 'Attempt', 'Pulled']);
@@ -3275,7 +3283,7 @@ function viewerData(run) {
   const students = readRoster_().slice().sort((a, b) => a.raw.localeCompare(b.raw)).map(s => ({ id: s.id, label: s.raw }));
   const paper = f.inbox.getFoldersByName(run + SCAN_SUFFIX).hasNext();
   return { run: run, paper: paper, files: files, grades: grades, review: review, marks: marks, checks: checks, unmatched: unmatched, names: names,
-           students: Object.keys(unmatched).length ? students : [] };
+           students: students };
 }
 
 /** One coded file for the viewer (only S-#### files in "2 Ready for Claude"). Big files come back as a Drive viewer link instead. */
@@ -3413,6 +3421,62 @@ function webLabelUnmatched(run, code, studentId) {
   return { ok: true, text: 'Matched. That file is now ' + real + '.' };
 }
 
+/**
+ * Version 21: moves one coded file to the student you pick (fixes a wrong or missing match).
+ * Its grade, Review and Marks rows go with it when the old code has no other files and the new
+ * student has no grade yet. Called from the page through the starter's rpc().
+ */
+function webMoveFile(run, fileId, studentId) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    run = String(run || '');
+    const roster = readRoster_();
+    const s = roster.filter(x => x.id === String(studentId))[0];
+    if (!s) return { ok: false, error: 'Pick a student from the list.' };
+    const real = ensureCodes_(run, roster)[studentKey_(s)];
+    const f = folders_();
+    let readyFo = null;
+    const it = f.ready.getFoldersByName(run);
+    while (it.hasNext()) { const x = it.next(); if (!x.isTrashed()) readyFo = x; }
+    if (!readyFo) return { ok: false, error: 'This assignment has no folder in "2 Ready for Claude".' };
+    const files = codedFiles_(readyFo);
+    const me = files.filter(x => x.id === String(fileId))[0];
+    if (!me) return { ok: false, error: 'That file is not in "2 Ready for Claude/' + run + '" any more. Close See the work and open it again.' };
+    const from = me.code;
+    if (from === real) return { ok: true, text: 'That file already belongs to ' + s.raw + '.' };
+    const file = DriveApp.getFileById(me.id);
+    const parent = file.getParents().next();
+    const newName = nextOutName_(real, me.name.slice(me.name.lastIndexOf('.')), parent);
+    file.setName(newName);
+    const others = files.filter(x => x.code === from && x.id !== me.id).length;
+    let note = '';
+    const book = claudeGradesBook_();
+    if (others) {
+      note = ' ' + from + ' still has other files, so its grade stayed where it was. Check both scores.';
+    } else if (book) {
+      const gs = book.getSheets()[0];
+      const g = gs.getDataRange().getValues();
+      const has = c => g.some((r, i) => i && String(r[0]).trim() === run && String(r[1]).trim() === c && String(r[2]) !== '');
+      if (has(real) && has(from)) {
+        note = ' ' + s.raw + ' already had a grade, so the grade from this file was left under ' + from + '. Check the score.';
+      } else {
+        [gs, book.getSheetByName(REVIEW_TAB), book.getSheetByName(MARKS_TAB)].forEach(sh => {
+          if (!sh) return;
+          const data = sh.getDataRange().getValues();
+          for (let i = 1; i < data.length; i++) if (String(data[i][0]).trim() === run && String(data[i][1]).trim() === from) sh.getRange(i + 1, 2).setValue(real);
+        });
+      }
+    }
+    if (!others) deleteRows_(ss_().getSheetByName(TAB_KEY), r => r[0] === run && String(r[1]) === from && /^UNMATCHED: /.test(String(r[2])), 2);
+    bumpKey_(run, real, newName, 'File moved here from ' + from + ' in the app.');
+    log_(run, real, 'Moved in the app', 'Was ' + from + '. Now ' + newName + '.');
+    return { ok: true, code: real, text: 'Moved. That file now belongs to ' + s.raw + ' (' + real + ').' + note };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 /** The class list for Settings: names, nicknames to hide, and "full name only". */
 function webRosterList() {
   const sh = ss_().getSheetByName(TAB_ROSTER);
@@ -3511,16 +3575,48 @@ function errText(e){ return (e && e.message) ? e.message : String(e); }
 if (window.pdfjsLib) { try { pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER; } catch (e) {} }
 var D = null, people = [], shown = [], at = 0, fileAt = 0, drawing = 0;
 
-call('viewerData', RUN).then(function(d){
-  D = d;
-  var by = {};
-  d.files.forEach(function(f){ (by[f.code] = by[f.code] || []).push(f); });
-  people = Object.keys(by).map(function(c){ return { code: c, files: by[c] }; });
-  Object.keys(d.grades).forEach(function(c){ if (!by[c]) people.push({ code: c, files: [] }); });
-  people.sort(function(a, b){ return nameOf(a.code).localeCompare(nameOf(b.code)); });
-  $('filter').onchange = function(){ at = 0; build(); };
-  build();
-}).catch(function(e){ $('pages').innerHTML = ''; $('pages').appendChild(el('div', 'center', errText(e))); });
+/* Version 21: the data can be loaded again (after a file is moved) without reloading the page */
+function loadData(showCode){
+  return call('viewerData', RUN).then(function(d){
+    D = d;
+    var by = {};
+    d.files.forEach(function(f){ (by[f.code] = by[f.code] || []).push(f); });
+    people = Object.keys(by).map(function(c){ return { code: c, files: by[c] }; });
+    Object.keys(d.grades).forEach(function(c){ if (!by[c]) people.push({ code: c, files: [] }); });
+    people.sort(function(a, b){ return nameOf(a.code).localeCompare(nameOf(b.code)); });
+    $('filter').onchange = function(){ at = 0; build(); };
+    if (showCode) { $('filter').value = 'all'; shown = people; var k = people.map(function(p){ return p.code; }).indexOf(showCode); at = k > -1 ? k : 0; fileAt = 0; }
+    build();
+  }).catch(function(e){ $('pages').innerHTML = ''; $('pages').appendChild(el('div', 'center', errText(e))); });
+}
+loadData();
+
+/* Version 21: pick a student for a file (a wrong match, or one the tool couldn't match) */
+function studentPicker(box, file, label){
+  var sel = el('select'); sel.appendChild(el('option', '', 'Pick the student...')); sel.options[0].value = '';
+  D.students.forEach(function(st){ var o = el('option', '', st.label); o.value = st.id; sel.appendChild(o); });
+  var mb = el('button', 'go', label); mb.type = 'button';
+  var msg = el('div', 'msg');
+  mb.onclick = function(){
+    if (!sel.value) { msg.className = 'msg err'; msg.textContent = 'Pick the student first.'; return; }
+    mb.disabled = true; msg.className = 'msg'; msg.textContent = 'Moving...';
+    call('rpc', 'webMoveFile', [RUN, file.id, sel.value]).then(function(r){
+      if (!r || !r.ok) { mb.disabled = false; msg.className = 'msg err'; msg.textContent = (r && r.error) || 'That did not work. Try again.'; return; }
+      FILES = {}; FILE_ORDER = [];
+      loadData(r.code).then(function(){ alertMsg(r.text); });
+    }).catch(function(e){ mb.disabled = false; msg.className = 'msg err'; msg.textContent = errText(e); });
+  };
+  var up = el('button', '', 'Student not in the list? Update the class list'); up.type = 'button'; up.style.marginTop = '6px';
+  up.onclick = function(){
+    up.disabled = true; up.textContent = 'Updating from Canvas...';
+    call('webUpdateRoster', '').then(function(r){
+      up.textContent = (r && r.ok) ? r.text : ((r && r.error) || 'Could not update.');
+      return call('viewerData', RUN).then(function(d){ D.students = d.students; sel.innerHTML = ''; sel.appendChild(el('option', '', 'Pick the student...')); sel.options[0].value = '';
+        D.students.forEach(function(st){ var o = el('option', '', st.label); o.value = st.id; sel.appendChild(o); }); });
+    }).catch(function(e){ up.textContent = errText(e); });
+  };
+  box.appendChild(sel); box.appendChild(mb); box.appendChild(el('br')); box.appendChild(up); box.appendChild(msg);
+}
 
 function nameOf(c){ var n = D && D.names && D.names[c]; return n || (D && D.unmatched[c] !== undefined ? 'Not matched yet' : c); }
 function waiting(c){ return (D.review[c] || []).filter(function(r){ return r.eric === null; }).length; }
@@ -3675,13 +3771,15 @@ function side(p){
     if (c.kind === 'look') { var ok = el('button', '', 'Looks fine'); ok.type = 'button'; ok.onclick = function(){ call('webDismissCheck', RUN, c.code, c.file).then(function(){ D.checks[p.code] = D.checks[p.code].filter(function(x){ return x !== c; }); build(); }); }; b.appendChild(el('br')); b.appendChild(ok); }
     s.appendChild(b);
   });
-  if (D.unmatched[p.code] !== undefined) {
-    var u = el('div', 'box amber', 'The tool could not tell whose this is (file: ' + D.unmatched[p.code] + '). Who is it?');
-    var sel = el('select'); sel.appendChild(el('option', '', 'Pick the student...')); sel.options[0].value = '';
-    D.students.forEach(function(st){ var o = el('option', '', st.label); o.value = st.id; sel.appendChild(o); });
-    var mb = el('button', 'go', 'Match'); mb.type = 'button';
-    mb.onclick = function(){ if (!sel.value) return; call('webLabelUnmatched', RUN, p.code, sel.value).then(function(r){ if (!r.ok) { alertMsg(r.error, true); return; } location.reload(); }); };
-    u.appendChild(sel); u.appendChild(mb); s.appendChild(u);
+  if (D.unmatched[p.code] !== undefined && p.files[fileAt]) {
+    var u = el('div', 'box amber', 'The tool could not tell whose this is (file: ' + D.unmatched[p.code] + '). Who is it? ');
+    studentPicker(u, p.files[fileAt], 'Match');
+    s.appendChild(u);
+  } else if (p.files[fileAt]) {
+    var w = el('details'); w.style.marginTop = '10px';
+    w.appendChild(el('summary', 'muted', 'Wrong student? Move this file'));
+    var wb = el('div', 'box soft'); studentPicker(wb, p.files[fileAt], 'Move it'); w.appendChild(wb);
+    s.appendChild(w);
   }
   s.appendChild(el('label', '', 'Score'));
   var sc = el('input', 'score'); sc.value = g ? g.score : ''; sc.placeholder = '–'; s.appendChild(sc);
