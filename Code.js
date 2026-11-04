@@ -61,6 +61,11 @@
  *  is (the tool fills in the names it could read). The name area is painted
  *  white and the page saved as a flat picture, so the name is really gone.
  *  A test where a name still shows up is held back, NOT sent to Claude.
+ * Version 25 (2026-11-04): much faster See the work and Match names.
+ *  Your browser now downloads the files straight from your Drive, several at
+ *  a time (before, each one went through the script one by one, turned into
+ *  text). Removing names saves several tests at once and builds their coded
+ *  PDFs side by side instead of one after another.
  * Version 24 (2026-11-04): your classes. Settings > Your classes lists every
  *  Canvas course you teach in; tick the ones you use. Only ticked classes show
  *  in the assignment lists (Pull, Send, Paper test), and Update roster adds
@@ -187,7 +192,7 @@
  */
 
 const APP = 'Anonymizer';
-const APP_VERSION = 24;   // Version 17: the app compares this with the newest version from Rowan
+const APP_VERSION = 25;   // Version 17: the app compares this with the newest version from Rowan
 const TAB_ROSTER = 'Roster';
 const TAB_KEY = 'Key';
 const TAB_RESULTS = 'Results';
@@ -1094,8 +1099,11 @@ function matchPage(fileId) {
  * test: { pages: [seq...], studentId: '<Canvas ID>' | 'hold', clean: [{ seq, jpg: base64 }] }
  */
 function matchSave(run, test) {
+  // Version 25: the cleaned pictures are saved before taking the lock, so several tests can save at once
+  const pagesFolder0 = folderByName_(folderByName_(folders_().done, run), PAGES_FOLDER);
+  const made = (test.clean || []).map(c => ({ seq: Number(c.seq), id: pagesFolder0.createFile(Utilities.newBlob(Utilities.base64Decode(String(c.jpg)), 'image/jpeg', c.seq + '-clean.jpg')).getId() }));
   const lock = LockService.getScriptLock();
-  lock.waitLock(20000);
+  lock.waitLock(30000);
   try {
     const pages = unplannedPages_(run);
     const bySeq = {};
@@ -1110,20 +1118,51 @@ function matchSave(run, test) {
       code = ensureCodes_(run, roster)[studentKey_(s)];
       canvasId = s.id;
     }
-    const pagesFolder = folderByName_(folderByName_(folders_().done, run), PAGES_FOLDER);
-    const clean = [];
-    (test.clean || []).forEach(c => {
-      if (seqs.indexOf(Number(c.seq)) < 0) return;
-      const blob = Utilities.newBlob(Utilities.base64Decode(String(c.jpg)), 'image/jpeg', c.seq + '-clean.jpg');
-      clean.push(c.seq + '=' + pagesFolder.createFile(blob).getId());
-    });
+    const clean = made.filter(c => seqs.indexOf(c.seq) > -1).map(c => c.seq + '=' + c.id);
     const sh = ensurePlanTab_();
     const n = sh.getDataRange().getValues().slice(1).filter(r => r[0] === run).length + 1;
     sh.appendRow([run, n, code, canvasId, seqs.join(','), clean.join(';'), 'Ready to save', '']);
-    return { ok: true, code: code };
+    return { ok: true, code: code, test: n };
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * Version 25: a short-lived key so YOUR browser can download your own files straight from Drive (much faster
+ * than sending them through the script). It never leaves your browser and stops working within an hour. Through rpc.
+ */
+function webDriveToken() { return ScriptApp.getOAuthToken(); }
+
+/** Version 25: gets everything ready once before several tests are built at the same time. Through rpc. */
+function matchPrepareBuild(run) {
+  run = String(run || '');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const f = folders_();
+    const props = PropertiesService.getDocumentProperties();
+    const doneFolder = folderByName_(f.done, run);
+    folderByName_(doneFolder, HELD_FOLDER);
+    ensureCodes_(run, readRoster_());
+    const outKey = 'SOUT::' + run;
+    let outFolder = null;
+    try { outFolder = DriveApp.getFolderById(props.getProperty(outKey)); if (outFolder.isTrashed()) outFolder = null; } catch (e) { outFolder = null; }
+    if (!outFolder) {
+      const main = folderByName_(f.ready, run);
+      outFolder = hasWork_(main) ? main.createFolder('Added ' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd') + ' (send these)') : main;
+      props.setProperty(outKey, outFolder.getId());
+    }
+    return { ok: true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Version 25: builds the coded PDFs for these tests only (the window runs a few of these at the same time). Through rpc. */
+async function matchBuildTests(run, tests) {
+  const r = await buildScanPlans_(folders_(), Date.now(), { run: String(run || ''), tests: (tests || []).map(Number) });
+  return { done: r.done, counts: r.counts || {}, stopped: r.stopped };
 }
 
 /** Last step of the window: try to build the PDFs now. (If this window can't, auto-run or Process the Inbox will.) */
@@ -1137,13 +1176,18 @@ async function matchBuild() {
  * Step 3: builds one PDF per saved test. Cleaned pages go in as the flat pictures; the rest as scanned.
  * Each cleaned picture is read again: a name still there holds the test back.
  */
-async function buildScanPlans_(f, start) {
+async function buildScanPlans_(f, start, only) {
   const plan = ss_().getSheetByName(TAB_PLAN);
   if (!plan) return { done: 0, text: '' };
   const rows = plan.getDataRange().getValues();
   const todo = [];
-  for (let i = 1; i < rows.length; i++) if (rows[i][6] === 'Ready to save') todo.push(i + 1);
-  if (!todo.length) return { done: 0, text: '' };
+  // Version 25: a test being built by another run is "Saving"; one left "Saving" for 7+ minutes (the run was stopped) is tried again
+  const stale = r => r[6] === 'Saving' && Date.now() - (Number(String(r[7]).replace('claimed ', '')) || 0) > 7 * 60 * 1000;
+  for (let i = 1; i < rows.length; i++) {
+    if (only && (String(rows[i][0]) !== only.run || only.tests.indexOf(Number(rows[i][1])) < 0)) continue;
+    if (rows[i][6] === 'Ready to save' || (!only && stale(rows[i]))) todo.push(i + 1);
+  }
+  if (!todo.length) { if (!only) cleanupScanRuns_(f, plan); return { done: 0, text: '', counts: {} }; }
   const PDFLib = loadPdfLib_();
   const roster = readRoster_();
   const scanRows = ss_().getSheetByName(TAB_SCANS).getDataRange().getValues().slice(1);
@@ -1154,7 +1198,18 @@ async function buildScanPlans_(f, start) {
   for (let k = 0; k < todo.length; k++) {
     if (Date.now() - start > TIME_LIMIT_MS) { stopped = true; break; }
     const rowNo = todo[k];
-    const r = plan.getRange(rowNo, 1, 1, PLAN_HEADERS.length).getValues()[0];
+    // Version 25: claim this test so two runs at the same time never build it twice
+    let r;
+    const claim = LockService.getScriptLock();
+    claim.waitLock(30000);
+    try {
+      r = plan.getRange(rowNo, 1, 1, PLAN_HEADERS.length).getValues()[0];
+      if (!(r[6] === 'Ready to save' || (!only && stale(r)))) r = null;
+      else plan.getRange(rowNo, 7, 1, 2).setValues([['Saving', 'claimed ' + Date.now()]]);
+    } finally {
+      claim.releaseLock();
+    }
+    if (!r) continue;
     const run = String(r[0]), code = String(r[2]);
     const c = counts[run] || (counts[run] = { made: 0, held: 0 });
     const doneFolder = folderByName_(f.done, run);
@@ -1217,22 +1272,32 @@ async function buildScanPlans_(f, start) {
     done++;
   }
 
-  // A test whose pages are all saved: remove the single pages (they have names) and the working rows
-  Object.keys(counts).forEach(run => {
-    const left = unplannedPages_(run).length;
-    const waiting = plan.getDataRange().getValues().slice(1).some(x => x[0] === run && x[6] === 'Ready to save');
-    if (left || waiting) return;
-    const doneFolder = folderByName_(f.done, run);
-    const it = doneFolder.getFoldersByName(PAGES_FOLDER);
-    while (it.hasNext()) deleteForever_(it.next().getId());
-    deleteRows_(ss_().getSheetByName(TAB_SCANS), x => x[0] === run, 2);
-    deleteRows_(plan, x => x[0] === run, 2);
-    props.deleteProperty('SOUT::' + run);
-  });
+  if (!only) cleanupScanRuns_(f, plan);   // version 25: never while other runs are still building
   const text = Object.keys(counts).map(run => run + ': ' + counts[run].made + ' test(s) saved in "2 Ready for Claude"' +
     (counts[run].held ? ', ' + counts[run].held + ' held back in "3 Processed originals/' + run + '/' + HELD_FOLDER + '" (the Log tab says why)' : '') + '.').join('\n') +
     (stopped ? '\nNot finished (Google time limit). Auto-run or Process the Inbox will finish the rest.' : '');
   return { done: done, text: text, stopped: stopped, counts: counts };
+}
+
+/**
+ * A test whose pages are all saved: remove the single pages (they have names) and the working rows.
+ * Version 25: checks every test on the Scan Plan tab (not only ones built in this run), since the window builds in several runs.
+ */
+function cleanupScanRuns_(f, plan) {
+  const props = PropertiesService.getDocumentProperties();
+  const runs = {};
+  plan.getDataRange().getValues().slice(1).forEach(x => { if (x[0]) runs[String(x[0])] = true; });
+  Object.keys(runs).forEach(run => {
+    const left = unplannedPages_(run).length;
+    const waiting = plan.getDataRange().getValues().slice(1).some(x => String(x[0]) === run && (x[6] === 'Ready to save' || x[6] === 'Saving'));
+    if (left || waiting) return;
+    const doneFolder = folderByName_(f.done, run);
+    const it = doneFolder.getFoldersByName(PAGES_FOLDER);
+    while (it.hasNext()) deleteForever_(it.next().getId());
+    deleteRows_(ss_().getSheetByName(TAB_SCANS), x => String(x[0]) === run, 2);
+    deleteRows_(plan, x => String(x[0]) === run, 2);
+    props.deleteProperty('SOUT::' + run);
+  });
 }
 
 function matchHtml_() {
@@ -1315,13 +1380,22 @@ function steps(){
 }
 
 /* ---------- pages ---------- */
+/* Version 25: pages come straight from Drive to this browser (fast); the old way is the backup */
+var TOKEN_P = null, TOKEN_AT = 0;
+function token(){ if (TOKEN_P && Date.now() - TOKEN_AT < 40 * 60 * 1000) return TOKEN_P; TOKEN_AT = Date.now(); TOKEN_P = call('rpc', 'webDriveToken', []).catch(function(e){ TOKEN_P = null; throw e; }); return TOKEN_P; }
+function driveBytes(id){
+  return token().then(function(t){ return fetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(id) + '?alt=media', { headers: { Authorization: 'Bearer ' + t } }); })
+    .then(function(r){ if (!r.ok) throw new Error('Drive ' + r.status); return r.arrayBuffer(); }).then(function(b){ return new Uint8Array(b); });
+}
 function doc(p){
   if (S.docs[p.fileId]) return S.docs[p.fileId];
-  S.docs[p.fileId] = call('matchPage', p.fileId).then(function(b64){
-    var raw = atob(b64), bytes = new Uint8Array(raw.length);
-    for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-    return pdfjsLib.getDocument({ data: bytes }).promise.then(function(d){ return d.getPage(1); });
-  });
+  S.docs[p.fileId] = driveBytes(p.fileId).catch(function(){
+    return call('matchPage', p.fileId).then(function(b64){
+      var raw = atob(b64), bytes = new Uint8Array(raw.length);
+      for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      return bytes;
+    });
+  }).then(function(bytes){ return pdfjsLib.getDocument({ data: bytes }).promise.then(function(d){ return d.getPage(1); }); });
   return S.docs[p.fileId];
 }
 /* Draws page p into canvas cv, widthPx wide. top/bottom = the part of the page to show (0 to 1). white = blank the top this much. */
@@ -1342,7 +1416,7 @@ function draw(p, cv, widthPx, opts){
     });
   });
 }
-function queue(jobs){ var i = 0; function next(){ if (i >= jobs.length) return Promise.resolve(); var j = jobs[i++]; return j().catch(function(){}).then(next); } return Promise.all([next(), next(), next()]); }
+function queue(jobs, n){ var i = 0; function next(){ if (i >= jobs.length) return Promise.resolve(); var j = jobs[i++]; return j().catch(function(){}).then(next); } var w = []; for (var k = 0; k < (n || 6); k++) w.push(next()); return Promise.all(w); }
 
 /* ---------- tests from the starts ---------- */
 function tests(){
@@ -1520,12 +1594,10 @@ function stepSave(){
   var out = el('div', 'box', ''); out.style.display = 'none'; b.appendChild(out);
   $('next').onclick = function(){
     $('next').disabled = true; $('back').disabled = true;
-    var i = 0;
-    function one(){
-      if (i >= t.length) return finish();
-      var x = t[i];
+    /* Version 25: three tests save at once, then the coded PDFs are built four at a time */
+    var savedTests = [], doneCount = 0, failed = null;
+    function saveOne(x){
       var who = S.who[x.first];
-      say('Saving test ' + (i + 1) + ' of ' + t.length + '...');
       var need = who === 'hold' ? [] : x.pages.filter(function(pi, j){ return j === 0 || S.blankAll || S.pages[pi].name === 'Y'; });
       var clean = [];
       var chain = Promise.resolve();
@@ -1539,11 +1611,40 @@ function stepSave(){
       });
       return chain.then(function(){
         return call('matchSave', S.run, { pages: x.pages.map(function(pi){ return S.pages[pi].seq; }), studentId: who, clean: clean });
-      }).then(function(){ i++; fill.style.width = (100 * i / t.length) + '%'; return one(); });
+      }).then(function(r){
+        if (r && r.test) savedTests.push(r.test);
+        doneCount++; fill.style.width = (50 * doneCount / t.length) + '%';
+        say('Removed the names on ' + doneCount + ' of ' + t.length + ' tests...');
+      }).catch(function(e){ failed = failed || e; });
+    }
+    function buildAll(){
+      if (!savedTests.length) return Promise.resolve();
+      say('Making the coded PDFs (several at once)...');
+      var groups = [], built = 0, made = 0, held = 0;
+      for (var g = 0; g < savedTests.length; g += 2) groups.push(savedTests.slice(g, g + 2));
+      return call('rpc', 'matchPrepareBuild', [S.run]).then(function(){
+        return queue(groups.map(function(grp){ return function(){
+          return call('rpc', 'matchBuildTests', [S.run, grp]).then(function(r){
+            built += grp.length; fill.style.width = (50 + 50 * built / savedTests.length) + '%';
+            var c = r && r.counts && r.counts[S.run]; if (c) { made += c.made; held += c.held; }
+            say('Made ' + built + ' of ' + savedTests.length + ' coded PDFs...');
+          });
+        }; }), 4);
+      }).then(function(){ S.buildMade = made; S.buildHeld = held; });
+    }
+    function one(){
+      return queue(t.map(function(x){ return function(){ return saveOne(x); }; }), 3).then(function(){
+        if (failed) throw failed;
+        return buildAll().catch(function(){}).then(finish);
+      });
     }
     function finish(){
-      say('Making the coded PDFs...');
+      say('Finishing up...');
       return call('matchBuild').then(function(r){
+        if (S.buildMade || S.buildHeld) {
+          var extra = (r && r.message) ? r.message : '';
+          r = { message: S.run + ': ' + S.buildMade + ' test(s) saved in “2 Ready for Claude”' + (S.buildHeld ? ', ' + S.buildHeld + ' held back for you to check (a name may still show)' : '') + '.' + (extra ? ' ' + extra : '') };
+        }
         out.style.display = 'block';
         out.textContent = (r && r.message) ? r.message + '\\n\\nNext: tell Rowan “grade.” You can close this window.'
           : 'Saved. The coded PDFs will be made by auto-run within about 10 minutes (or click Anonymizer > 2. Process the Inbox now). Then tell Rowan “grade.”';
@@ -1556,7 +1657,7 @@ function stepSave(){
         $('next').onclick = function(){ google.script.host.close(); };
       });
     }
-    one().catch(function(e){ say('Stopped at test ' + (i + 1) + ': ' + ((e && e.message) || e) + '. Tests before it are saved; open this window again to finish.', true); });
+    one().catch(function(e){ say('Stopped: ' + ((e && e.message) || e) + '. The tests that saved are kept; open this window again to finish the rest.', true); });
   };
 }
 </script>
@@ -3803,9 +3904,25 @@ function renderList(){
 
 /* Version 17: files are kept once loaded, and the next and previous students load in the background */
 var FILES = {}, FILE_ORDER = [];
+/* Version 25: files come straight from Drive to this browser (fast); the old way is the backup */
+var TOKEN_P = null, TOKEN_AT = 0;
+function token(){ if (TOKEN_P && Date.now() - TOKEN_AT < 40 * 60 * 1000) return TOKEN_P; TOKEN_AT = Date.now(); TOKEN_P = call('rpc', 'webDriveToken', []).catch(function(e){ TOKEN_P = null; throw e; }); return TOKEN_P; }
+function driveBytes(id){
+  return token().then(function(t){ return fetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(id) + '?alt=media', { headers: { Authorization: 'Bearer ' + t } }); })
+    .then(function(r){ if (!r.ok) throw new Error('Drive ' + r.status); return r.arrayBuffer(); }).then(function(b){ return new Uint8Array(b); });
+}
+function mimeOf(id){ var m = 'application/pdf'; (D && D.files || []).forEach(function(f){ if (f.id === id && f.mime) m = f.mime; }); return m; }
 function getFile(id){
   if (!FILES[id]) {
-    FILES[id] = call('viewerFile', id).then(function(f){
+    FILES[id] = driveBytes(id).then(function(bytes){ return { id: id, mime: mimeOf(id), bytes: bytes }; }).catch(function(){ return slowFile(id); });
+    FILE_ORDER.push(id);
+    while (FILE_ORDER.length > 12) { var old = FILE_ORDER.shift(); if (old !== id) delete FILES[old]; }
+  }
+  return FILES[id];
+}
+function slowFile(id){
+  {
+    return call('viewerFile', id).then(function(f){
       if (f.data || !f.size || f.size > 60 * 1024 * 1024) return f;   // version 22: big files come in 4.5 MB pieces
       var CH = 4718592, parts = [], start = 0;
       function next(){
@@ -3815,10 +3932,7 @@ function getFile(id){
       }
       return next();
     }).catch(function(e){ delete FILES[id]; throw e; });
-    FILE_ORDER.push(id);
-    while (FILE_ORDER.length > 12) { var old = FILE_ORDER.shift(); if (old !== id) delete FILES[old]; }
   }
-  return FILES[id];
 }
 function prefetch(){
   [at + 1, at - 1, at + 2].forEach(function(i){ var q = shown[i]; if (q && q.files[0]) getFile(q.files[0].id).catch(function(){}); });
@@ -3839,10 +3953,10 @@ function show(){
   getFile(file.id).then(function(f){
     if (mine !== drawing) return;
     pages.innerHTML = '';
-    if (!f.data) { var fr = el('iframe'); fr.src = 'https://drive.google.com/file/d/' + f.id + '/preview'; fr.title = 'Student work'; pages.appendChild(fr); return; }
-    if (f.mime.indexOf('image/') === 0) { var pg = el('div', 'pg'); pg.dataset.num = '1'; var im = el('img'); im.src = 'data:' + f.mime + ';base64,' + f.data; pg.appendChild(im); pages.appendChild(pg); PAGES[1] = { img: im, pg: pg }; addMarks(pg, p.code, 1); return; }
-    var raw = atob(f.data), bytes = new Uint8Array(raw.length);
-    for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    if (!f.data && !f.bytes) { var fr = el('iframe'); fr.src = 'https://drive.google.com/file/d/' + f.id + '/preview'; fr.title = 'Student work'; pages.appendChild(fr); return; }
+    if (f.mime.indexOf('image/') === 0) { var pg = el('div', 'pg'); pg.dataset.num = '1'; var im = el('img'); im.src = f.bytes ? URL.createObjectURL(new Blob([f.bytes], { type: f.mime })) : 'data:' + f.mime + ';base64,' + f.data; pg.appendChild(im); pages.appendChild(pg); PAGES[1] = { img: im, pg: pg }; addMarks(pg, p.code, 1); return; }
+    var bytes = f.bytes ? f.bytes.slice() : null;   // a copy: pdf.js takes over the one it's given
+    if (!bytes) { var raw = atob(f.data); bytes = new Uint8Array(raw.length); for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i); }
     pdfjsLib.getDocument({ data: bytes }).promise.then(function(doc){
       var n = 0;
       function one(){
