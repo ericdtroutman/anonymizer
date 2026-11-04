@@ -61,6 +61,14 @@
  *  is (the tool fills in the names it could read). The name area is painted
  *  white and the page saved as a flat picture, so the name is really gone.
  *  A test where a name still shows up is held back, NOT sent to Claude.
+ * Version 27 (2026-11-04): projects and assignments only. Paper tests and
+ *  quizzes are turned off (you grade those by hand). The app no longer shows
+ *  the Paper test tile, scan uploads, Match names, answer keys, held tests or
+ *  the curve button; auto-run and Clean leave any "(scans)" folder alone; the
+ *  Paper tests menu items just say they're off. Projects, Canvas, Review,
+ *  See the work and Send work exactly as before. Grades already in the
+ *  Sheet for a test (like the Unit 2 Test) can still be sent or finished.
+ *  Switch: PAPER_TESTS_OFF below.
  * Version 26 (2026-11-04): square root curve for tests. Each test's card has
  *  "Square root curve". Every score becomes total x the square root of
  *  (raw / total): 6.5/16 becomes 10.2/16, 12/16 becomes 13.9/16, 16/16 stays
@@ -205,7 +213,8 @@
  */
 
 const APP = 'Anonymizer';
-const APP_VERSION = 26;   // Version 17: the app compares this with the newest version from Rowan
+const APP_VERSION = 27;
+const PAPER_TESTS_OFF = true;   // Version 27: paper tests and quizzes are graded by hand, not in this tool   // Version 17: the app compares this with the newest version from Rowan
 const TAB_ROSTER = 'Roster';
 const TAB_KEY = 'Key';
 const TAB_RESULTS = 'Results';
@@ -642,7 +651,7 @@ function hasFiles_(folder) { return folder.getFiles().hasNext(); }
 function assignmentInboxes_(inbox) {
   const out = [];
   const it = inbox.getFolders();
-  while (it.hasNext()) { const fo = it.next(); if (hasFiles_(fo)) out.push(fo); }
+  while (it.hasNext()) { const fo = it.next(); if (PAPER_TESTS_OFF && isScanFolder_(fo.getName())) continue; if (hasFiles_(fo)) out.push(fo); }   // version 27
   return out;
 }
 
@@ -807,6 +816,7 @@ function isScanFolder_(name) { return String(name).slice(-SCAN_SUFFIX.length) ==
 function runFromScanFolder_(name) { return String(name).slice(0, -SCAN_SUFFIX.length).trim(); }
 
 function makeScanFolder() {
+  if (PAPER_TESTS_OFF) { SpreadsheetApp.getUi().alert('Paper tests are turned off (version 27). Tests and quizzes are graded by hand now; this tool is for projects and other assignments.'); return; }
   const title = 'Scan folder for a paper test';
   try {
     showCanvasPicker_('scans', title, 'Which test or quiz? Pick it from your Canvas list so the grades can go back to the right assignment later.');
@@ -998,6 +1008,7 @@ async function processScanBatch_(run, inbox, f, roster, start) {
 /* ---------- the Match window (all of this runs in your school account) ---------- */
 
 function openNameMatcher() {
+  if (PAPER_TESTS_OFF) { SpreadsheetApp.getUi().alert('Paper tests are turned off (version 27). Tests and quizzes are graded by hand now; this tool is for projects and other assignments.'); return; }
   const html = HtmlService.createHtmlOutput(matchHtml_()).setWidth(1180).setHeight(800);
   SpreadsheetApp.getUi().showModalDialog(html, 'Match names and remove them');
 }
@@ -1190,6 +1201,7 @@ async function matchBuild() {
  * Each cleaned picture is read again: a name still there holds the test back.
  */
 async function buildScanPlans_(f, start, only) {
+  if (PAPER_TESTS_OFF) return { done: 0, text: '' };   // version 27
   const plan = ss_().getSheetByName(TAB_PLAN);
   if (!plan) return { done: 0, text: '' };
   const rows = plan.getDataRange().getValues();
@@ -2987,6 +2999,10 @@ function webStatusFast_() {
       heldFiles: heldList
     };
     if (a.toMatch || a.scans) a.paper = true;
+    if (PAPER_TESTS_OFF) {   // version 27: no test features on the cards
+      a.paper = false; a.scans = 0; a.toMatch = 0; a.toBuild = 0; a.held = 0; a.heldFiles = []; a.key = null; a.notes = false;
+      if (a.tests !== undefined) { a.tests = 0; a.curved = 0; }
+    }
     a.next = a.inbox || a.scans ? 'clean' : a.toMatch ? 'match' : a.toBuild ? 'clean' : a.toGrade ? 'rowan'
       : a.review ? 'review' : a.toSend ? 'send' : a.graded ? 'finish' : (a.paper || a.canvas || !a.onKey) ? 'get' : 'old';
     return a;
@@ -3084,6 +3100,10 @@ function webStatusSlow_() {
       })()
     };
     if (a.toMatch || a.scans) a.paper = true;
+    if (PAPER_TESTS_OFF) {   // version 27: no test features on the cards
+      a.paper = false; a.scans = 0; a.toMatch = 0; a.toBuild = 0; a.held = 0; a.heldFiles = []; a.key = null; a.notes = false;
+      if (a.tests !== undefined) { a.tests = 0; a.curved = 0; }
+    }
     a.next = a.inbox || a.scans ? 'clean' : a.toMatch ? 'match' : a.toBuild ? 'clean' : a.toGrade ? 'rowan'
       : a.review ? 'review' : a.toSend ? 'send' : a.graded ? 'finish' : (a.paper || a.canvas || !a.onKey) ? 'get' : 'old';
     return a;
@@ -4900,6 +4920,7 @@ function checkUpdate(){
 }
 $('tPull').onclick = function(){ pull(); };
 $('tPaper').onclick = paper;
+$('tPaper').style.display = 'none';   // version 27: paper tests are off
 $('tClean').onclick = function(){ clean(); };
 $('refresh').onclick = refresh;
 $('settingsBtn').onclick = function(){ settings(); };

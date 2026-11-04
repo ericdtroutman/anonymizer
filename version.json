@@ -1,7 +1,7 @@
 {
-  "version": 26,
+  "version": 27,
   "date": "2026-11-04",
-  "notes": "Square root curve button on each test card (raw and curved score both show in the feedback). Review choices and mark changes now update the score in the feedback too, and the app tells you when a test still has a question waiting.",
+  "notes": "Projects and assignments only: paper tests and quizzes are turned off (no scan upload, Match names, answer keys or curve). Everything for projects works as before.",
   "scopes": [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
