@@ -1,7 +1,7 @@
 {
-  "version": 23,
+  "version": 24,
   "date": "2026-11-04",
-  "notes": "Tests: the Answer key window now has Notes for Rowan (how you want it graded) and a spot for a blank copy of the test.",
+  "notes": "Settings > Your classes: tick the classes you teach. Only those show in the assignment lists, and Update roster adds their students.",
   "scopes": [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",

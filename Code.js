@@ -61,6 +61,11 @@
  *  is (the tool fills in the names it could read). The name area is painted
  *  white and the page saved as a flat picture, so the name is really gone.
  *  A test where a name still shows up is held back, NOT sent to Claude.
+ * Version 24 (2026-11-04): your classes. Settings > Your classes lists every
+ *  Canvas course you teach in; tick the ones you use. Only ticked classes show
+ *  in the assignment lists (Pull, Send, Paper test), and Update roster adds
+ *  the students from every ticked class (how a second class, like Earth
+ *  Science, gets on the class list).
  * Version 23 (2026-11-04): notes for Rowan on tests. The Answer key window
  *  (and the Paper test upload) now has "Notes for Rowan" (how you want it
  *  graded: lenient, points per part, follow-through credit, other answers to
@@ -182,7 +187,7 @@
  */
 
 const APP = 'Anonymizer';
-const APP_VERSION = 23;   // Version 17: the app compares this with the newest version from Rowan
+const APP_VERSION = 24;   // Version 17: the app compares this with the newest version from Rowan
 const TAB_ROSTER = 'Roster';
 const TAB_KEY = 'Key';
 const TAB_RESULTS = 'Results';
@@ -459,10 +464,36 @@ function canvasPickerOptions_() {
   return options;
 }
 
+/* ---------- version 24: which Canvas classes are yours ---------- */
+/** The class ids you ticked in Settings > Your classes, or null if you haven't picked yet (then all show). */
+function shownCourses_() {
+  try {
+    const a = JSON.parse(PropertiesService.getDocumentProperties().getProperty('COURSES_SHOWN') || 'null');
+    return Array.isArray(a) ? a.map(String) : null;
+  } catch (e) { return null; }
+}
+/** Every Canvas course you teach in, with whether it's ticked. Through rpc. */
+function webCourseList() {
+  try { canvasSettings_(); } catch (e) { return { ok: false, error: 'Connect to Canvas first (above).' }; }
+  const shown = shownCourses_();
+  const seen = {};
+  const courses = canvasGetAll_('/api/v1/courses?enrollment_type=teacher&enrollment_state=active&include[]=term&include[]=total_students')
+    .filter(c => c && c.id && !seen[c.id] && (seen[c.id] = true))
+    .map(c => ({ id: String(c.id), name: c.name || c.course_code || ('Course ' + c.id), term: (c.term && c.term.name && c.term.name !== 'Default Term') ? c.term.name : '',
+                 students: (typeof c.total_students === 'number') ? c.total_students : null, shown: !shown || shown.indexOf(String(c.id)) > -1 }));
+  return { ok: true, courses: courses, chosen: !!shown };
+}
+/** Saves which classes are ticked. Through rpc. */
+function webSaveCourses(ids) {
+  const a = (ids || []).map(String).filter(x => /^\d+$/.test(x));
+  PropertiesService.getDocumentProperties().setProperty('COURSES_SHOWN', JSON.stringify(a));
+  return { ok: true, text: a.length + ' class' + (a.length === 1 ? '' : 'es') + ' on. Only these show in the assignment lists, and Update roster adds their students.' };
+}
+
 /** Version 17: the Canvas list is remembered for 10 minutes, so Pull and Send open quickly. */
 function canvasCourseAssignments_(savedCourseIds) {
   const cache = CacheService.getUserCache();
-  const key = 'canvasList:' + (savedCourseIds || []).slice().sort().join(',');
+  const key = 'canvasList:' + (savedCourseIds || []).slice().sort().join(',') + '|' + JSON.stringify(shownCourses_());   // version 24
   try { const hit = cache.get(key); if (hit) return JSON.parse(hit); } catch (e) { /* ignore */ }
   const out = canvasCourseAssignmentsFresh_(savedCourseIds);
   try {
@@ -488,7 +519,8 @@ function canvasCourseAssignmentsFresh_(savedCourseIds) {
         catch (e) { /* course closed or not reachable */ }
       }
     });
-    order.forEach(id => {
+    const shown = shownCourses_();   // version 24: only the classes you ticked
+    order.filter(id => !shown || shown.indexOf(String(id)) > -1).forEach(id => {
       try {
         const list = canvasGetAll_('/api/v1/courses/' + id + '/assignments?order_by=due_at')
           .filter(a => a && a.id && a.name && a.published !== false).reverse();
@@ -1830,10 +1862,11 @@ function updateRosterFromCanvas() {
 /** Adds Canvas students who aren't on the Roster yet. links: course links (or blank for the saved courses). Returns a message. */
 function updateRoster_(links) {
   const sh = ensureSheet_(TAB_CANVAS, ['Assignment', 'Canvas link', 'Course ID', 'Assignment ID', 'Last pulled']);
-  let courses = sh.getDataRange().getValues().slice(1).map(r => String(r[2])).filter(Boolean);
+  let courses = shownCourses_() || sh.getDataRange().getValues().slice(1).map(r => String(r[2])).filter(Boolean);   // version 24: your ticked classes
+  courses = courses.slice();
   (String(links || '').match(/courses\/(\d+)/g) || []).forEach(m => courses.push(m.replace('courses/', '')));
   courses = courses.filter((c, i) => courses.indexOf(c) === i);
-  if (!courses.length) return 'No courses yet. Paste a link from your Canvas course.';
+  if (!courses.length) return 'No classes yet. Tick your classes under Your classes (or paste a link from a Canvas course).';
   const roster = ss_().getSheetByName(TAB_ROSTER);
   const data = roster.getDataRange().getValues();
   const byId = {};
@@ -4395,8 +4428,37 @@ function settings(note){
   var am = el('div', 'err'); am.style.color = 'var(--green)'; d.appendChild(am);
   cb.onchange = function(){ am.textContent = 'Saving...'; call('webAutoRun', cb.checked).then(function(r){ am.textContent = r.text; refresh(); }); };
   d.appendChild(el('hr'));
+  /* version 24: your classes */
+  d.appendChild(el('label', '', 'Your classes'));
+  d.appendChild(el('p', '', 'Tick the classes you teach. Only these show in the assignment lists, and Update roster adds their students.')).style.cssText = 'color:var(--muted);font-size:13px;margin:0 0 6px';
+  var cbox = el('div'); cbox.style.cssText = 'border:1px solid var(--line);border-radius:8px;padding:6px 10px;max-height:220px;overflow:auto';
+  cbox.appendChild(el('div', '', 'Loading your Canvas classes...')).style.color = 'var(--muted)';
+  d.appendChild(cbox);
+  var cmsg = el('div', 'err'); d.appendChild(cmsg);
+  var cchecks = [];
+  call('rpc', 'webCourseList', []).then(function(r){
+    cbox.innerHTML = '';
+    if (!r || !r.ok) { cbox.appendChild(el('div', '', (r && r.error) || 'Could not load your classes.')).style.color = 'var(--muted)'; return; }
+    if (!r.courses.length) { cbox.appendChild(el('div', '', 'Canvas shows no classes where you are a teacher.')).style.color = 'var(--muted)'; return; }
+    r.courses.forEach(function(c){
+      var lab = el('label'); lab.style.cssText = 'display:flex;gap:8px;align-items:center;font-weight:normal;margin:6px 0';
+      var cb = el('input'); cb.type = 'checkbox'; cb.style.width = 'auto'; cb.checked = c.shown; cb.value = c.id;
+      lab.appendChild(cb);
+      lab.appendChild(document.createTextNode(c.name + (c.term ? ' (' + c.term + ')' : '') + (c.students !== null ? ', ' + c.students + ' students' : '')));
+      cbox.appendChild(lab); cchecks.push(cb);
+    });
+    if (!r.chosen) { cmsg.style.color = 'var(--amber)'; cmsg.textContent = 'All your Canvas classes show right now. Untick the ones that aren\u2019t yours, then Save classes.'; }
+  }).catch(function(e){ cbox.innerHTML = ''; cbox.appendChild(el('div', '', errText(e))); });
+  var rc = buttons(d, [{ label: 'Save classes', fn: function(){
+    var ids = cchecks.filter(function(x){ return x.checked; }).map(function(x){ return x.value; });
+    if (!cchecks.length) return;
+    if (!ids.length) { cmsg.style.color = ''; cmsg.textContent = 'Tick at least one class.'; return; }
+    cmsg.style.color = ''; cmsg.textContent = 'Saving...';
+    call('rpc', 'webSaveCourses', [ids]).then(function(r){ cmsg.style.color = 'var(--green)'; cmsg.textContent = r.text; }).catch(function(e){ cmsg.textContent = errText(e); });
+  } }]);
+  rc.style.justifyContent = 'flex-start';
   d.appendChild(el('label', '', 'Update roster from Canvas'));
-  d.appendChild(el('p', '', 'Paste a link to any page in each course (several are fine), or leave it blank to use the courses you have pulled from.')).style.cssText = 'color:var(--muted);font-size:13px';
+  d.appendChild(el('p', '', 'Adds new students from the classes ticked above. To add another course just once, paste a link to any page in it.')).style.cssText = 'color:var(--muted);font-size:13px';
   var links = el('textarea'); links.rows = 2; d.appendChild(links);
   var rm = el('div', 'err'); d.appendChild(rm);
   var r2 = buttons(d, [{ label: 'Update roster', fn: function(){ rm.style.color = ''; rm.textContent = 'Updating...'; call('webUpdateRoster', links.value).then(function(r){ rm.style.color = r.ok ? 'var(--green)' : ''; rm.textContent = r.ok ? r.text : r.error; }).catch(function(e){ rm.textContent = errText(e); }); } }]);
