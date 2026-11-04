@@ -1,7 +1,7 @@
 {
-  "version": 18,
+  "version": 19,
   "date": "2026-11-04",
-  "notes": "Shows which version you have next to the title. (A small first update, to check that Install works.)",
+  "notes": "Runs from the new starter: updates install with one click, and Undo the last update can put the old version back.",
   "scopes": [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -11,5 +11,6 @@
     "https://www.googleapis.com/auth/script.scriptapp",
     "https://www.googleapis.com/auth/script.container.ui",
     "https://www.googleapis.com/auth/script.projects"
-  ]
+  ],
+  "starter": 1
 }

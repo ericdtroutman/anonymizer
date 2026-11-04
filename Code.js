@@ -61,6 +61,14 @@
  *  is (the tool fills in the names it could read). The name area is painted
  *  white and the page saved as a flat picture, so the name is really gone.
  *  A test where a name still shows up is held back, NOT sent to Claude.
+ * Version 19 (2026-11-04): runs from the starter. Code.gs in Apps Script is
+ *  now a small starter you paste once (Rowan's copy page). It builds the
+ *  Anonymizer menu and keeps this code in a file in your school Drive
+ *  ("Student Work Anonymizer/Tool code (do not edit)"). Install puts a new
+ *  version in that file; Anonymizer > Undo the last update puts the old one
+ *  back. The menu, Install and Undo live in the starter, so they work even if
+ *  an update has a problem. (Google doesn't let school accounts use the Apps
+ *  Script API that version 17 used.)
  * Version 18 (2026-11-04): the app shows which version you have (next to
  *  the title). The first update installed with the Install button.
  * Version 17 (2026-11-04): faster, and the tool updates itself.
@@ -146,9 +154,7 @@
  */
 
 const APP = 'Anonymizer';
-const APP_VERSION = 18;   // Version 17: the app compares this with the newest version from Rowan
-const UPDATE_BASE = 'https://raw.githubusercontent.com/ericdtroutman/anonymizer/main/';
-const END_MARK = '/* END OF ANONYMIZER CODE */';
+const APP_VERSION = 19;   // Version 17: the app compares this with the newest version from Rowan
 const TAB_ROSTER = 'Roster';
 const TAB_KEY = 'Key';
 const TAB_RESULTS = 'Results';
@@ -192,37 +198,7 @@ const MIME_BY_EXT = {
 };
 
 /* ============================== MENU ============================== */
-
-function onOpen() {
-  try { ss_(); } catch (e) { /* remembers this Sheet for the web app */ }
-  const ui = SpreadsheetApp.getUi();
-  ui.createMenu(APP)
-    .addItem('Open the app (web page)', 'openWebApp')
-    .addItem('Update the tool (from Rowan)', 'updateFromMenu')
-    .addSeparator()
-    .addItem('1. Set up (run once)', 'setup')
-    .addSeparator()
-    .addItem('2. Process the Inbox', 'processInbox')
-    .addItem('3. Bring in Claude\'s grades', 'bringInClaudeGrades')
-    .addItem('4. Review what Rowan was not sure about', 'openReview')
-    .addSeparator()
-    .addSubMenu(ui.createMenu('Paper tests')
-      .addItem('Make a scan folder for a test', 'makeScanFolder')
-      .addItem('Match names and remove them', 'openNameMatcher'))
-    .addSubMenu(ui.createMenu('Canvas')
-      .addItem('Connect to Canvas', 'connectCanvas')
-      .addItem('Pull submissions (new and late)', 'pullSubmissions')
-      .addItem('Send grades and comments to Canvas', 'sendGradesToCanvas')
-      .addItem('Update roster from Canvas', 'updateRosterFromCanvas')
-      .addItem('Disconnect Canvas', 'disconnectCanvas'))
-    .addSeparator()
-    .addItem('Turn auto-run on or off', 'toggleAutoRun')
-    .addItem('Make an Inbox folder for an assignment', 'makeAssignmentInbox')
-    .addItem('Open the folders', 'showFolders')
-    .addItem('Finish an assignment (delete its files)', 'finishAssignment')
-    .addItem('Cancel the current run', 'cancelRun')
-    .addToUi();
-}
+/* Version 19: the Anonymizer menu (onOpen) is built by the starter in Code.gs. */
 
 /* ============================== SETUP ============================= */
 
@@ -4171,122 +4147,7 @@ refresh().then(checkUpdate);
 </script>
 </body></html>`;
 
-/* ============================ UPDATES (version 17) ================== */
-/*
- * Rowan keeps the newest code at UPDATE_BASE (Code.js, version.json). The app
- * checks version.json; Install downloads Code.js, checks it is complete and has
- * no mistakes in it, saves a copy of the current code in Apps Script's Project
- * history, then replaces this file through the Apps Script API (your own
- * account, the "script.projects" permission). Nothing about students is sent.
- * One-time setup: script.google.com/home/usersettings > Google Apps Script API: On,
- * and the manifest (appsscript.json) from Rowan's copy page.
- */
-
-function updateHeaders_() {
-  const h = {};
-  const t = PropertiesService.getUserProperties().getProperty('GITHUB_TOKEN');   // only for a private copy
-  if (t) h.Authorization = 'token ' + t;
-  return h;
-}
-
-/** The newest version's number and notes: { version, date, notes, scopes }. Remembered 10 minutes unless fresh. */
-function updateInfo_(fresh) {
-  const cache = CacheService.getUserCache();
-  if (!fresh) { try { const hit = cache.get('updateInfo'); if (hit) return JSON.parse(hit); } catch (e) { /* ignore */ } }
-  const r = UrlFetchApp.fetch(UPDATE_BASE + 'version.json?t=' + Date.now(), { muteHttpExceptions: true, headers: updateHeaders_() });
-  if (r.getResponseCode() !== 200) throw new Error('Could not check for updates (error ' + r.getResponseCode() + ').');
-  const info = JSON.parse(r.getContentText());
-  try { cache.put('updateInfo', JSON.stringify(info), 600); } catch (e) { /* ignore */ }
-  return info;
-}
-
-function webUpdateInfo() {
-  try {
-    const v = updateInfo_(false);
-    return { current: APP_VERSION, latest: Number(v.version) || 0, date: v.date || '', notes: v.notes || '', ready: Number(v.version) > APP_VERSION };
-  } catch (e) {
-    return { current: APP_VERSION, error: e.message };
-  }
-}
-
-function scriptApiError_(resp, what) {
-  const code = resp.getResponseCode();
-  const text = resp.getContentText();
-  if (code === 403 && /has not been used|is disabled|not enabled|SERVICE_DISABLED|usersettings/i.test(text)) {
-    return 'The Apps Script API is switched off. Open script.google.com/home/usersettings, click "Google Apps Script API", switch it On, then click Install again.';
-  }
-  if (code === 403 || code === 401) {
-    return 'The tool doesn\'t have permission to update itself yet. Paste the manifest from Rowan\'s copy page into appsscript.json (one time), reload the Sheet and approve. (' + what + ', error ' + code + ')';
-  }
-  return 'Google would not ' + what + ' (error ' + code + '). Your code was not changed.';
-}
-
-/** Installs the newest version. Returns a message. Throws a plain message if it can't (nothing is changed then). */
-function installUpdate_() {
-  const info = updateInfo_(true);
-  const ver = Number(info.version) || 0;
-  if (ver <= APP_VERSION) return 'You already have the newest version (' + APP_VERSION + ').';
-  const dl = UrlFetchApp.fetch(UPDATE_BASE + 'Code.js?v=' + ver + '&t=' + Date.now(), { muteHttpExceptions: true, headers: updateHeaders_() });
-  if (dl.getResponseCode() !== 200) throw new Error('Could not download the update (error ' + dl.getResponseCode() + '). Try again in a few minutes.');
-  const src = dl.getContentText();
-  if (src.indexOf('STUDENT WORK ANONYMIZER') < 0 || src.trim().slice(-END_MARK.length) !== END_MARK || src.indexOf('const APP_VERSION = ' + ver + ';') < 0) {
-    throw new Error('The update did not download completely (or is still being posted). Try again in a few minutes. Nothing was changed.');
-  }
-  try { new Function(src); }   // checks the code can be read, without running it
-  catch (e) { throw new Error('The update has a mistake in it, so it was not installed (' + e.message + '). Tell Rowan. Nothing was changed.'); }
-
-  const api = 'https://script.googleapis.com/v1/projects/' + ScriptApp.getScriptId();
-  const hdr = { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() };
-  let r = UrlFetchApp.fetch(api + '/content', { headers: hdr, muteHttpExceptions: true });
-  if (r.getResponseCode() !== 200) throw new Error(scriptApiError_(r, 'read the current code'));
-  const files = JSON.parse(r.getContentText()).files || [];
-  const servers = files.filter(x => x.type === 'SERVER_JS');
-  const target = servers.filter(x => /STUDENT WORK ANONYMIZER/.test(x.source || ''))[0] || servers[0];
-  if (!target) throw new Error('Could not find the tool\'s code file in Apps Script. Nothing was changed.');
-
-  // A copy of the code as it is now, in Apps Script > Project history (to undo, if ever needed)
-  const snap = UrlFetchApp.fetch(api + '/versions', { method: 'post', contentType: 'application/json', headers: hdr, muteHttpExceptions: true,
-    payload: JSON.stringify({ description: 'Version ' + APP_VERSION + ', saved before installing version ' + ver }) });
-  if (snap.getResponseCode() !== 200) throw new Error(scriptApiError_(snap, 'save a copy of the current code'));
-
-  target.source = src;
-  // Permissions the new version needs (added to the manifest; you approve them the next time you open the tool)
-  let newScopes = [];
-  const man = files.filter(x => x.type === 'JSON' && x.name === 'appsscript')[0];
-  if (man && Array.isArray(info.scopes)) {
-    try {
-      const m = JSON.parse(man.source);
-      if (Array.isArray(m.oauthScopes)) {
-        newScopes = info.scopes.filter(sc => m.oauthScopes.indexOf(sc) < 0);
-        if (newScopes.length) { m.oauthScopes = m.oauthScopes.concat(newScopes); man.source = JSON.stringify(m, null, 2); }
-      }
-    } catch (e) { /* leave the manifest as it is */ }
-  }
-  r = UrlFetchApp.fetch(api + '/content', { method: 'put', contentType: 'application/json', headers: hdr, muteHttpExceptions: true,
-    payload: JSON.stringify({ files: files.map(x => ({ name: x.name, type: x.type, source: x.source })) }) });
-  if (r.getResponseCode() !== 200) throw new Error(scriptApiError_(r, 'save the new code'));
-  try { CacheService.getUserCache().remove('updateInfo'); } catch (e) { /* ignore */ }
-  return 'Installed version ' + ver + '.' + (info.notes ? ' ' + info.notes : '') +
-    '\n\nReload this page (and the Sheet, if it is open) to start using it.' +
-    (newScopes.length ? ' Google will ask you to approve a new permission once.' : '') +
-    '\n\nThe old version is saved in Apps Script > Project history if it ever needs to be put back.';
-}
-
-function webInstallUpdate() {
-  try { return { ok: true, text: installUpdate_() }; }
-  catch (e) { return { ok: false, error: (e && e.message) ? e.message : String(e) }; }
-}
-
-/** Sheet menu: Update the tool (from Rowan). */
-function updateFromMenu() {
-  const ui = SpreadsheetApp.getUi();
-  let info;
-  try { info = updateInfo_(true); } catch (e) { ui.alert(e.message); return; }
-  if (!(Number(info.version) > APP_VERSION)) { ui.alert('You have the newest version (' + APP_VERSION + ').'); return; }
-  const go = ui.alert('Update ready: version ' + info.version, (info.notes || '') + '\n\nInstall it now? (You have version ' + APP_VERSION + '.)', ui.ButtonSet.YES_NO);
-  if (go !== ui.Button.YES) return;
-  try { ui.alert(installUpdate_()); } catch (e) { ui.alert('Update not installed', e.message, ui.ButtonSet.OK); }
-}
+/* Version 19: checking for updates, Install and Undo are in the starter (Code.gs). */
 
 /* ============================== CLEANUP =========================== */
 
