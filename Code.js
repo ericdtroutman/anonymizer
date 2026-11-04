@@ -61,6 +61,8 @@
  *  is (the tool fills in the names it could read). The name area is painted
  *  white and the page saved as a flat picture, so the name is really gone.
  *  A test where a name still shows up is held back, NOT sent to Claude.
+ * Version 18 (2026-11-04): the app shows which version you have (next to
+ *  the title). The first update installed with the Install button.
  * Version 17 (2026-11-04): faster, and the tool updates itself.
  *  - The app opens right away with what it showed last time, then fills in
  *    the newest numbers. Refresh reads your folders in a few big requests
@@ -144,7 +146,7 @@
  */
 
 const APP = 'Anonymizer';
-const APP_VERSION = 17;   // Version 17: the app compares this with the newest version from Rowan
+const APP_VERSION = 18;   // Version 17: the app compares this with the newest version from Rowan
 const UPDATE_BASE = 'https://raw.githubusercontent.com/ericdtroutman/anonymizer/main/';
 const END_MARK = '/* END OF ANONYMIZER CODE */';
 const TAB_ROSTER = 'Roster';
@@ -3721,7 +3723,8 @@ const WEB_HOME_HTML = `<!doctype html>
   *{box-sizing:border-box}
   body{margin:0;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:var(--fg);background:var(--bg)}
   header{background:#fff;border-bottom:1px solid var(--line);padding:12px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;position:sticky;top:0;z-index:5}
-  header h1{font-size:18px;margin:0;margin-right:auto}
+  header h1{font-size:18px;margin:0}
+  header .ver{color:var(--muted);font-size:12px;margin-right:auto}
   .chip{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:14px;font-size:13px;background:var(--soft);color:var(--muted);border:1px solid var(--line);cursor:pointer}
   .chip.on{background:var(--green-soft);color:var(--green);border-color:#b7dfc2}
   .chip.off{background:var(--amber-soft);color:var(--amber);border-color:#f3d9a7}
@@ -3776,6 +3779,7 @@ const WEB_HOME_HTML = `<!doctype html>
 <body>
 <header>
   <h1>Student Work Anonymizer</h1>
+  <span class="ver" id="ver"></span>
   <span class="chip" id="canvasChip">Canvas</span>
   <span class="chip" id="autoChip">Auto-run</span>
   <button class="small" id="settingsBtn" type="button">Settings</button>
@@ -4087,6 +4091,7 @@ function stepText(k, a){
   return '';
 }
 function render(){
+  $('ver').textContent = ST && ST.version ? 'Version ' + ST.version : '';
   $('canvasChip').textContent = ST.canvas ? 'Canvas connected' : 'Canvas not connected';
   $('canvasChip').className = 'chip ' + (ST.canvas ? 'on' : 'off');
   $('autoChip').textContent = 'Auto-run ' + (ST.autoRun ? 'on' : 'off');
