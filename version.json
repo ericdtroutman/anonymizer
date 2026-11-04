@@ -1,7 +1,7 @@
 {
-  "version": 21,
+  "version": 22,
   "date": "2026-11-04",
-  "notes": "Fix a match: See the work has \"Wrong student? Move this file\", and a button to update the class list when a student is missing.",
+  "notes": "Cover a name the tool missed: in See the work, drag a box over it and it's painted out for good. Big files open in See the work too.",
   "scopes": [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",

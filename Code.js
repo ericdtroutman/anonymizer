@@ -61,6 +61,12 @@
  *  is (the tool fills in the names it could read). The name area is painted
  *  white and the page saved as a flat picture, so the name is really gone.
  *  A test where a name still shows up is held back, NOT sent to Claude.
+ * Version 22 (2026-11-04): cover a name the tool missed. In See the work,
+ *  "Cover a name or face" lets you drag a box over anything on any page
+ *  (a name in a picture, a face, a signature). Save paints those spots white
+ *  and saves each of those pages as a flat picture, so it's really gone; the
+ *  other pages stay as they were. Big files (over 15 MB) now open in See the
+ *  work too, so they can be covered.
  * Version 21 (2026-11-04): fixing a match. In See the work, every file has
  *  "Wrong student?": pick the right student and the file moves to them (its
  *  grade, review and marks go with it when nothing else is under that code).
@@ -169,7 +175,7 @@
  */
 
 const APP = 'Anonymizer';
-const APP_VERSION = 21;   // Version 17: the app compares this with the newest version from Rowan
+const APP_VERSION = 22;   // Version 17: the app compares this with the newest version from Rowan
 const TAB_ROSTER = 'Roster';
 const TAB_KEY = 'Key';
 const TAB_RESULTS = 'Results';
@@ -3288,6 +3294,80 @@ function viewerData(run) {
 
 /** One coded file for the viewer (only S-#### files in "2 Ready for Claude"). Big files come back as a Drive viewer link instead. */
 function viewerFile(fileId) {
+  const file = viewerCheck_(fileId);
+  const out = { id: file.getId(), mime: file.getMimeType(), name: file.getName(), size: file.getSize() };
+  if (file.getSize() <= 15 * 1024 * 1024) out.data = Utilities.base64Encode(file.getBlob().getBytes());
+  return out;
+}
+
+/** Version 22: one piece of a big coded file (Drive sends only those bytes), for See the work. Through rpc. */
+function viewerFileChunk(fileId, start, len) {
+  const file = viewerCheck_(fileId);
+  start = Math.max(0, Number(start) || 0);
+  const end = Math.min(file.getSize(), start + (Number(len) || 4718592)) - 1;
+  if (end < start) return '';
+  const r = UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/files/' + file.getId() + '?alt=media', {
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken(), Range: 'bytes=' + start + '-' + end }, muteHttpExceptions: true });
+  if (r.getResponseCode() !== 206 && r.getResponseCode() !== 200) throw new Error('Drive would not send the file (error ' + r.getResponseCode() + ').');
+  let bytes = r.getContent();
+  if (r.getResponseCode() === 200 && bytes.length > end - start + 1) bytes = bytes.slice(start, end + 1);   // Drive ignored the range
+  return Utilities.base64Encode(bytes);
+}
+
+/**
+ * Version 22: covers what you boxed. pages: [{ page: 1-based, jpg: base64 of the whole page with white boxes painted }].
+ * Those pages become flat pictures (the name is really gone); the other pages are copied as they were.
+ * The coded file is replaced. Its original is still in Processed originals. Through rpc.
+ */
+async function webCoverFile(run, fileId, pages) {
+  run = String(run || '');
+  const file = viewerCheck_(fileId);
+  const m = file.getName().match(/^(S-\d{4})(-\d+)?\.(pdf|png|jpe?g)$/i);
+  if (!pages || !pages.length) return { ok: false, error: 'Draw a box over the name first.' };
+  const covered = {};
+  pages.forEach(p => { if (p && p.jpg) covered[Number(p.page)] = String(p.jpg); });
+  const PDFLib = loadPdfLib_();
+  const out = await PDFLib.PDFDocument.create();
+  const addJpg = async (b64, W, H) => {
+    const img = await out.embedJpg(new Uint8Array(Utilities.base64Decode(b64)));
+    if (!W || !H) { const landscape = img.width > img.height; W = landscape ? 792 : 612; H = landscape ? 612 : 792; }
+    const s = Math.min(W / img.width, H / img.height);
+    out.addPage([W, H]).drawImage(img, { x: (W - img.width * s) / 2, y: (H - img.height * s) / 2, width: img.width * s, height: img.height * s });
+  };
+  const isPdf = /pdf/i.test(m[3]);
+  let total = 1;
+  if (isPdf) {
+    const src = await PDFLib.PDFDocument.load(new Uint8Array(file.getBlob().getBytes()), { ignoreEncryption: true, updateMetadata: false });
+    total = src.getPageCount();
+    for (let i = 0; i < total; i++) {
+      if (covered[i + 1]) {
+        const pg = src.getPage(i);
+        const sz = pg.getSize();
+        const turned = Math.abs(((pg.getRotation().angle || 0) % 180)) === 90;
+        await addJpg(covered[i + 1], turned ? sz.height : sz.width, turned ? sz.width : sz.height);
+      } else {
+        const [cp] = await out.copyPages(src, [i]);
+        out.addPage(cp);
+      }
+    }
+  } else {
+    if (!covered[1]) return { ok: false, error: 'Draw a box over the name first.' };
+    await addJpg(covered[1], 0, 0);
+  }
+  out.setTitle(m[1]); out.setAuthor(''); out.setSubject(''); out.setKeywords([]);
+  out.setCreator('Student Work Anonymizer'); out.setProducer('Student Work Anonymizer');
+  const bytes = await out.save();
+  const parent = file.getParents().next();
+  const name = isPdf ? file.getName() : nextOutName_(m[1] + (m[2] || ''), '.pdf', parent);
+  const nf = parent.createFile(u8ToBlob_(bytes, name));
+  deleteForever_(file.getId());
+  const n = Object.keys(covered).length;
+  log_(run, m[1], 'Covered in the app', n + ' page(s) painted over and saved as pictures (' + name + ').');
+  return { ok: true, id: nf.getId(), code: m[1], text: 'Covered. ' + n + ' page' + (n === 1 ? '' : 's') + ' saved as a flat picture, so what you boxed is gone for good.' };
+}
+
+/** A coded file (S-####) inside "2 Ready for Claude" (or one of its folders), or an error. */
+function viewerCheck_(fileId) {
   const file = DriveApp.getFileById(String(fileId));
   if (!/^S-\d{4}(-\d+)?\.(pdf|png|jpe?g)$/i.test(file.getName())) throw new Error('That is not a coded file.');
   const ready = folders_().ready.getId();
@@ -3299,9 +3379,7 @@ function viewerFile(fileId) {
     while (gp.hasNext()) { const g = gp.next(); if (g.getId() === ready) ok = true; else { const g2 = g.getParents(); while (g2.hasNext()) if (g2.next().getId() === ready) ok = true; } }
   }
   if (!ok) throw new Error('That file is not in "2 Ready for Claude".');
-  const out = { id: file.getId(), mime: file.getMimeType(), name: file.getName() };
-  if (file.getSize() <= 15 * 1024 * 1024) out.data = Utilities.base64Encode(file.getBlob().getBytes());
-  return out;
+  return file;
 }
 
 /** Saves a score and feedback you changed in the viewer (into the Claude Grades Sheet, where Send picks it up). */
@@ -3522,6 +3600,12 @@ const VIEWER_PAGE_HTML = `
   .pg{position:relative;margin:0 auto 14px;max-width:860px;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.2)}
   .pg canvas,.pg img{width:100%;display:block}
   .pg .no{position:absolute;left:8px;top:6px;font-size:11px;color:var(--muted);background:rgba(255,255,255,.85);padding:1px 5px;border-radius:3px}
+  .coverbar{position:sticky;top:0;z-index:8;margin:0 auto 12px;max-width:860px;background:var(--amber-soft);color:#4a2f00;border:1px solid #f3d9a7;border-radius:10px;padding:10px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .coverbar span{flex:1;min-width:200px}
+  .covering .pg{cursor:crosshair;user-select:none}
+  .covering .mk{pointer-events:none}
+  .cbox{position:absolute;background:rgba(255,255,255,.92);outline:2px solid var(--red);z-index:4}
+  .cbox b{position:absolute;right:-11px;top:-11px;width:22px;height:22px;line-height:22px;text-align:center;border-radius:50%;background:var(--red);color:#fff;font-size:14px;cursor:pointer}
   .mk{position:absolute;transform:translate(-50%,-50%);font-family:Caveat,'Comic Sans MS',cursive;color:var(--red);font-weight:700;line-height:1;white-space:nowrap;pointer-events:auto}
   .mk.check,.mk.x{font-size:44px}
   .mk.partial{font-size:34px}
@@ -3645,7 +3729,16 @@ function renderList(){
 var FILES = {}, FILE_ORDER = [];
 function getFile(id){
   if (!FILES[id]) {
-    FILES[id] = call('viewerFile', id).catch(function(e){ delete FILES[id]; throw e; });
+    FILES[id] = call('viewerFile', id).then(function(f){
+      if (f.data || !f.size || f.size > 60 * 1024 * 1024) return f;   // version 22: big files come in 4.5 MB pieces
+      var CH = 4718592, parts = [], start = 0;
+      function next(){
+        if (start >= f.size) { f.data = parts.join(''); return f; }
+        var s0 = start; start += CH;
+        return call('rpc', 'viewerFileChunk', [id, s0, CH]).then(function(b){ parts.push(b); return next(); });
+      }
+      return next();
+    }).catch(function(e){ delete FILES[id]; throw e; });
     FILE_ORDER.push(id);
     while (FILE_ORDER.length > 12) { var old = FILE_ORDER.shift(); if (old !== id) delete FILES[old]; }
   }
@@ -3654,8 +3747,10 @@ function getFile(id){
 function prefetch(){
   [at + 1, at - 1, at + 2].forEach(function(i){ var q = shown[i]; if (q && q.files[0]) getFile(q.files[0].id).catch(function(){}); });
 }
+var PAGES = {}, COVER = null;
 function show(){
   var p = shown[at];
+  PAGES = {}; COVER = null;
   $('who').textContent = nameOf(p.code) + (nameOf(p.code) !== p.code ? '  (' + p.code + ')' : ''); $('count').textContent = (at + 1) + ' of ' + shown.length;
   $('prev').disabled = at === 0; $('next').disabled = at >= shown.length - 1;
   side(p);
@@ -3669,7 +3764,7 @@ function show(){
     if (mine !== drawing) return;
     pages.innerHTML = '';
     if (!f.data) { var fr = el('iframe'); fr.src = 'https://drive.google.com/file/d/' + f.id + '/preview'; fr.title = 'Student work'; pages.appendChild(fr); return; }
-    if (f.mime.indexOf('image/') === 0) { var pg = el('div', 'pg'); var im = el('img'); im.src = 'data:' + f.mime + ';base64,' + f.data; pg.appendChild(im); pages.appendChild(pg); addMarks(pg, p.code, 1); return; }
+    if (f.mime.indexOf('image/') === 0) { var pg = el('div', 'pg'); pg.dataset.num = '1'; var im = el('img'); im.src = 'data:' + f.mime + ';base64,' + f.data; pg.appendChild(im); pages.appendChild(pg); PAGES[1] = { img: im, pg: pg }; addMarks(pg, p.code, 1); return; }
     var raw = atob(f.data), bytes = new Uint8Array(raw.length);
     for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
     pdfjsLib.getDocument({ data: bytes }).promise.then(function(doc){
@@ -3683,7 +3778,7 @@ function show(){
           var base = page.getViewport({ scale: 1 });
           var ratio = window.devicePixelRatio || 1;
           var vp = page.getViewport({ scale: (w / base.width) * ratio });
-          var pg = el('div', 'pg'); var cv = el('canvas'); cv.width = vp.width; cv.height = vp.height; pg.appendChild(cv);
+          var pg = el('div', 'pg'); pg.dataset.num = String(num); PAGES[num] = { page: page, pg: pg }; var cv = el('canvas'); cv.width = vp.width; cv.height = vp.height; pg.appendChild(cv);
           pg.appendChild(el('span', 'no', 'page ' + num + ' of ' + doc.numPages));
           pages.appendChild(pg);
           return page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise.then(function(){ addMarks(pg, p.code, num); return one(); });
@@ -3692,6 +3787,86 @@ function show(){
       return one();
     }).catch(function(){ pages.innerHTML = ''; var fr = el('iframe'); fr.src = 'https://drive.google.com/file/d/' + f.id + '/preview'; pages.appendChild(fr); });
   }).catch(function(e){ if (mine === drawing) { pages.innerHTML = ''; pages.appendChild(el('div', 'center', 'Could not load: ' + errText(e))); } });
+}
+
+/* ---------- version 22: cover a name or face ---------- */
+function startCover(p){
+  var file = p.files[fileAt];
+  if (!file || !Object.keys(PAGES).length) { alertMsg('Wait for the pages to finish loading, then try again.', true); return; }
+  if (COVER) return;
+  COVER = { code: p.code, file: file, boxes: [] };
+  var pages = $('pages'); pages.classList.add('covering');
+  var bar = el('div', 'coverbar'); bar.id = 'coverbar';
+  bar.appendChild(el('span', '', 'Drag a box over each thing to hide (name, face, signature). Click the x on a box to remove it.'));
+  var save = el('button', 'go', 'Paint them out and save'); save.type = 'button'; save.onclick = saveCover;
+  var cancel = el('button', '', 'Cancel'); cancel.type = 'button'; cancel.onclick = stopCover;
+  bar.appendChild(save); bar.appendChild(cancel);
+  pages.insertBefore(bar, pages.firstChild);
+  pages.onmousedown = function(e){
+    if (!COVER || e.button !== 0) return;
+    var pg = e.target.closest ? e.target.closest('.pg') : null;
+    if (!pg || e.target.tagName === 'B') return;
+    e.preventDefault();
+    var r = pg.getBoundingClientRect();
+    var x0 = (e.clientX - r.left) / r.width, y0 = (e.clientY - r.top) / r.height;
+    var box = { num: Number(pg.dataset.num), x: x0, y: y0, w: 0, h: 0 };
+    var d = el('div', 'cbox'); pg.appendChild(d);
+    function place(){ d.style.left = (box.x * 100) + '%'; d.style.top = (box.y * 100) + '%'; d.style.width = (box.w * 100) + '%'; d.style.height = (box.h * 100) + '%'; }
+    function move(ev){
+      var x1 = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)), y1 = Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height));
+      box.x = Math.min(x0, x1); box.y = Math.min(y0, y1); box.w = Math.abs(x1 - x0); box.h = Math.abs(y1 - y0); place();
+    }
+    function up(){
+      document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
+      if (box.w < 0.005 || box.h < 0.003) { d.remove(); return; }
+      COVER.boxes.push(box);
+      var x = el('b', '', '\u00d7'); x.title = 'Remove this box';
+      x.onmousedown = function(ev){ ev.stopPropagation(); };
+      x.onclick = function(ev){ ev.stopPropagation(); COVER.boxes = COVER.boxes.filter(function(b){ return b !== box; }); d.remove(); };
+      d.appendChild(x);
+    }
+    document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+  };
+}
+function stopCover(){
+  COVER = null;
+  var pages = $('pages'); pages.classList.remove('covering'); pages.onmousedown = null;
+  var bar = $('coverbar'); if (bar) bar.remove();
+  Array.prototype.slice.call(pages.querySelectorAll('.cbox')).forEach(function(b){ b.remove(); });
+}
+/* Draws each boxed page big, paints the boxes white, and sends the pictures to be saved */
+function saveCover(){
+  if (!COVER || !COVER.boxes.length) { alertMsg('Drag a box over the name first.', true); return; }
+  var c = COVER, nums = {};
+  c.boxes.forEach(function(b){ (nums[b.num] = nums[b.num] || []).push(b); });
+  var bar = $('coverbar'); bar.querySelectorAll('button').forEach(function(b){ b.disabled = true; }); bar.firstChild.textContent = 'Painting them out and saving...';
+  var out = [];
+  var chain = Promise.resolve();
+  Object.keys(nums).forEach(function(k){
+    chain = chain.then(function(){
+      var P = PAGES[k], cv = document.createElement('canvas');
+      var paint = function(){
+        var x = cv.getContext('2d'); x.fillStyle = '#fff';
+        nums[k].forEach(function(b){ x.fillRect(Math.floor(b.x * cv.width) - 2, Math.floor(b.y * cv.height) - 2, Math.ceil(b.w * cv.width) + 4, Math.ceil(b.h * cv.height) + 4); });
+        out.push({ page: Number(k), jpg: cv.toDataURL('image/jpeg', 0.88).split(',')[1] });
+      };
+      if (P.img) { cv.width = P.img.naturalWidth; cv.height = P.img.naturalHeight; var x0 = cv.getContext('2d'); x0.fillStyle = '#fff'; x0.fillRect(0, 0, cv.width, cv.height); x0.drawImage(P.img, 0, 0); paint(); return; }
+      var base = P.page.getViewport({ scale: 1 });
+      var vp = P.page.getViewport({ scale: Math.min(3, 1700 / base.width) });
+      cv.width = Math.round(vp.width); cv.height = Math.round(vp.height);
+      var ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height);
+      return P.page.render({ canvasContext: ctx, viewport: vp }).promise.then(paint);
+    });
+  });
+  chain.then(function(){ return call('rpc', 'webCoverFile', [RUN, c.file.id, out]); }).then(function(r){
+    if (!r || !r.ok) throw new Error((r && r.error) || 'That did not save.');
+    delete FILES[c.file.id];
+    return loadData(c.code).then(function(){ alertMsg(r.text); });
+  }).catch(function(e){
+    if (!$('coverbar')) return;
+    bar.querySelectorAll('button').forEach(function(b){ b.disabled = false; });
+    bar.firstChild.textContent = 'Not saved: ' + errText(e) + ' Try again.';
+  });
 }
 
 /* Rowan's red-pen marks. A mark tied to a question you decided in Review shows your points. */
@@ -3780,6 +3955,12 @@ function side(p){
     w.appendChild(el('summary', 'muted', 'Wrong student? Move this file'));
     var wb = el('div', 'box soft'); studentPicker(wb, p.files[fileAt], 'Move it'); w.appendChild(wb);
     s.appendChild(w);
+  }
+  if (p.files[fileAt]) {   // version 22
+    var cvb = el('button', '', 'Cover a name or face'); cvb.type = 'button'; cvb.style.marginTop = '10px';
+    cvb.title = 'Drag a box over anything the tool missed; it gets painted out for good';
+    cvb.onclick = function(){ startCover(p); };
+    s.appendChild(cvb);
   }
   s.appendChild(el('label', '', 'Score'));
   var sc = el('input', 'score'); sc.value = g ? g.score : ''; sc.placeholder = '–'; s.appendChild(sc);
