@@ -61,6 +61,14 @@
  *  is (the tool fills in the names it could read). The name area is painted
  *  white and the page saved as a flat picture, so the name is really gone.
  *  A test where a name still shows up is held back, NOT sent to Claude.
+ * Version 20 (2026-11-04): one slow file can't block the Inbox any more.
+ *  Google stops any run after 6 minutes. Before, a file too big to clean in
+ *  that time stayed in the Inbox and every Clean started over on it. Now each
+ *  file's tries are counted: on the 3rd try a PDF is rebuilt from its text
+ *  in one step (faster), and a file that still stops Google is set aside in
+ *  Processed originals and flagged "No file made", so the rest get cleaned.
+ *  The app also waits up to 6 minutes for an answer and says plainly when
+ *  Google stopped a run.
  * Version 19 (2026-11-04): runs from the starter. Code.gs in Apps Script is
  *  now a small starter you paste once (Rowan's copy page). It builds the
  *  Anonymizer menu and keeps this code in a file in your school Drive
@@ -154,7 +162,7 @@
  */
 
 const APP = 'Anonymizer';
-const APP_VERSION = 19;   // Version 17: the app compares this with the newest version from Rowan
+const APP_VERSION = 20;   // Version 17: the app compares this with the newest version from Rowan
 const TAB_ROSTER = 'Roster';
 const TAB_KEY = 'Key';
 const TAB_RESULTS = 'Results';
@@ -622,6 +630,14 @@ async function processBatch_(run, inbox, f, roster, start) {
     const code = grp.student ? codeMap[studentKey_(grp.student)] : unmatchedCode_(run, grp.files[0].getName());
     let outName = null;
     const notes = [];
+    const tryId = grp.files[0].getId();
+    if (bumpTries_(tryId) > MAX_TRIES) {   // version 20: set aside a group that keeps stopping Google
+      flagged++;
+      log_(run, code, 'No file made', TOO_SLOW + grp.files.map(x => x.getName()).join(', '));
+      grp.files.forEach(file => { try { file.moveTo(doneFolder); } catch (e) { /* leave it */ } });
+      clearTries_(tryId);
+      continue;
+    }
     if (!grp.student) notes.push('Could not match these pictures to a student. First file: ' + grp.files[0].getName());
     try {
       const r = combineImages_(grp.files, code, ctx);
@@ -636,17 +652,34 @@ async function processBatch_(run, inbox, f, roster, start) {
     if (bumpKey_(run, code, outName, notes.join(' ')) > 0 && ctx.added) notes.push(ALREADY_HAD);
     log_(run, code, outName ? 'Saved ' + outName : 'No file made', notes.join(' '));
     grp.files.forEach(file => { try { file.moveTo(doneFolder); } catch (e) { /* leave it */ } });
+    clearTries_(tryId);
   }
 
   // Every other file, one at a time
   for (let i = 0; i < ids.length && !timedOut; i++) {
     if (Date.now() - start > TIME_LIMIT_MS) { timedOut = true; break; }
     const file = DriveApp.getFileById(ids[i]);
+    const startedAt = Date.now();
+    const tries = bumpTries_(ids[i]);   // version 20
+    if (tries > MAX_TRIES) {
+      const s = matchStudent_(file.getName(), roster, '');
+      const code = s ? codeMap[studentKey_(s)] : unmatchedCode_(run, file.getName());
+      flagged++;
+      bumpKey_(run, code, null, 'Set aside: too slow to clean.');
+      log_(run, code, 'No file made', TOO_SLOW + file.getName());
+      try { file.moveTo(doneFolder); } catch (e) { /* leave it */ }
+      clearTries_(ids[i]);
+      continue;
+    }
+    ctx.lastTry = tries >= MAX_TRIES;   // last try: PDFs are rebuilt from their text in one step
     let result;
     try {
       result = await processFile_(file, ctx);
     } catch (e) {
-      if (e && e.message === OUT_OF_TIME) { timedOut = true; break; }   // file stays in the Inbox for the next round
+      if (e && e.message === OUT_OF_TIME) {
+        if (startedAt - start > 60 * 1000) undoTry_(ids[i]);   // it only got the end of a run: not its fault
+        timedOut = true; break;   // file stays in the Inbox for the next round
+      }
       result = { code: '', outName: null,
         note: 'Error: ' + e.message + ' (original is in Processed originals: ' + file.getName() + ')' };
     }
@@ -657,6 +690,7 @@ async function processBatch_(run, inbox, f, roster, start) {
     }
     log_(run, result.code || '?', result.outName ? 'Saved ' + result.outName : 'No file made', result.note || '');
     try { file.moveTo(doneFolder); } catch (e) { /* leave it */ }
+    clearTries_(ids[i]);
   }
 
   const totalMade = (Number(props.getProperty(madeKey)) || 0) + made;
@@ -3875,7 +3909,7 @@ function clean(looseRun, rounds){
   call('webProcess', token, looseRun || '').then(handle).catch(function(e){ poll(token, 0).then(function(r){ if (r) handle(r); else fail('Clean the Inbox')(e); }); });
 }
 function poll(token, n){
-  return new Promise(function(res){ setTimeout(res, 3000); }).then(function(){ return call('webResult', token); }).then(function(r){ if (r || n >= 20) return r || { ok: false, error: 'No answer from Google yet. Click Refresh in a minute to see where things stand.' }; return poll(token, n + 1); });
+  return new Promise(function(res){ setTimeout(res, 3000); }).then(function(){ return call('webResult', token); }).then(function(r){ if (r || n >= 120) return r || { ok: false, error: 'Google stopped this run before it finished (each run can only take 6 minutes). Click Clean the Inbox again to keep going. A file that stops Google 3 times is set aside for you, so the rest still get cleaned.' }; return poll(token, n + 1); });
 }
 function send(a){
   var go = function(v){ confirmable('Send grades to Canvas', 'webSend', v, 0); };
@@ -4271,6 +4305,9 @@ async function processFile_(file, ctx) {
     outName = importScrubExport_(target, MimeType.GOOGLE_SLIDES, 'slides', code, ctx);
   } else if (SHEET_EXT.indexOf(ext) > -1) {
     outName = importScrubExport_(target, MimeType.GOOGLE_SHEETS, 'sheet', code, ctx);
+  } else if (ext === 'pdf' && ctx.lastTry) {   // version 20: too slow page by page twice; one-step rebuild
+    outName = importScrubExport_(target, MimeType.GOOGLE_DOCS, 'doc', code, ctx);
+    notes.push('This PDF was too slow to check page by page, so it was rebuilt from its text in one step. Layout or pictures may look different; check it by eye.');
   } else if (ext === 'pdf') {
     const r = await handlePdf_(target, code, ctx);
     outName = r.outName;
@@ -4846,6 +4883,23 @@ function bumpKey_(run, code, outName, note) {
   }
   return 0;
 }
+
+/** Version 20: counts tries per file (saved before the work starts, so a run Google stops still counts). */
+const MAX_TRIES = 3;
+function bumpTries_(id) {
+  const p = PropertiesService.getDocumentProperties();
+  const n = (Number(p.getProperty('TRY::' + id)) || 0) + 1;
+  p.setProperty('TRY::' + id, String(n));
+  return n;
+}
+function undoTry_(id) {
+  const p = PropertiesService.getDocumentProperties();
+  const n = (Number(p.getProperty('TRY::' + id)) || 0) - 1;
+  if (n > 0) p.setProperty('TRY::' + id, String(n)); else p.deleteProperty('TRY::' + id);
+}
+function clearTries_(id) { try { PropertiesService.getDocumentProperties().deleteProperty('TRY::' + id); } catch (e) { /* ignore */ } }
+const TOO_SLOW = 'This file stopped Google\'s 6-minute limit ' + MAX_TRIES + ' times (too big or too slow to clean), so it was set aside in Processed originals and NOT sent to Rowan. ' +
+  'To grade it: open it, save or print it as a smaller PDF (or take the name off), and drop that in the Inbox. Original: ';
 
 /** Note added when a student already had work saved for this assignment (a redo, or a second file). */
 const ALREADY_HAD = 'This student already had a file for this assignment, so this may be a redo or an extra file.';

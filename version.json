@@ -1,7 +1,7 @@
 {
-  "version": 19,
+  "version": 20,
   "date": "2026-11-04",
-  "notes": "Runs from the new starter: updates install with one click, and Undo the last update can put the old version back.",
+  "notes": "One slow file can't hold up Clean the Inbox any more: after 3 tries it's set aside for you and the rest get cleaned.",
   "scopes": [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
