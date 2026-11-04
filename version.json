@@ -1,7 +1,7 @@
 {
-  "version": 22,
+  "version": 23,
   "date": "2026-11-04",
-  "notes": "Cover a name the tool missed: in See the work, drag a box over it and it's painted out for good. Big files open in See the work too.",
+  "notes": "Tests: the Answer key window now has Notes for Rowan (how you want it graded) and a spot for a blank copy of the test.",
   "scopes": [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",

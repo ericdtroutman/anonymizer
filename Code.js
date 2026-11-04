@@ -61,6 +61,13 @@
  *  is (the tool fills in the names it could read). The name area is painted
  *  white and the page saved as a flat picture, so the name is really gone.
  *  A test where a name still shows up is held back, NOT sent to Claude.
+ * Version 23 (2026-11-04): notes for Rowan on tests. The Answer key window
+ *  (and the Paper test upload) now has "Notes for Rowan" (how you want it
+ *  graded: lenient, points per part, follow-through credit, other answers to
+ *  accept) and an optional blank copy of the test. Notes are saved as
+ *  "Grading notes - <test>.txt" and the blank as "Blank test - <test>" next
+ *  to the key in "2 Ready for Claude/<test>". Rowan reads them before grading;
+ *  your notes win over the key. Change them any time and ask Rowan to regrade.
  * Version 22 (2026-11-04): cover a name the tool missed. In See the work,
  *  "Cover a name or face" lets you drag a box over anything on any page
  *  (a name in a picture, a face, a signature). Save paints those spots white
@@ -175,7 +182,7 @@
  */
 
 const APP = 'Anonymizer';
-const APP_VERSION = 22;   // Version 17: the app compares this with the newest version from Rowan
+const APP_VERSION = 23;   // Version 17: the app compares this with the newest version from Rowan
 const TAB_ROSTER = 'Roster';
 const TAB_KEY = 'Key';
 const TAB_RESULTS = 'Results';
@@ -2793,13 +2800,14 @@ function webStatusFast_() {
     g.forEach(c => { gradedSet[c] = true; });
     // coded work: files in the Ready folder and its Added folders
     const codes = {};
-    let codedFiles = 0, keyFile = null;
+    let codedFiles = 0, keyFile = null, notesFile = null;
     (readyRuns[run] || []).forEach(fo => {
       const top = under(L2, fo.id);
       const files = top.filter(x => !x.folder);
       top.filter(x => x.folder).forEach(sub => { under(L3, sub.id).filter(x => !x.folder).forEach(x => files.push(x)); });
       files.forEach(x => { const m = x.name.match(/^(S-\d{4})(-\d+)?\.(pdf|png|jpe?g)$/i); if (m) { codedFiles++; codes[m[1].toUpperCase()] = true; } });
       if (!keyFile) keyFile = top.filter(x => !x.folder && /answer key/i.test(x.name))[0] || null;
+      if (!notesFile) notesFile = top.filter(x => !x.folder && /^grading notes/i.test(x.name))[0] || null;   // version 23
     });
     const heldList = [];
     (doneRuns[run] || []).forEach(fo => under(L2, fo.id).filter(x => x.folder && x.name === HELD_FOLDER).forEach(h => {
@@ -2824,6 +2832,7 @@ function webStatusFast_() {
       toSend: g.filter(c => sentSig[c] !== sig[c]).length,
       canvas: saved[run] || '',
       key: keyFile ? { name: keyFile.name, url: fileUrl(keyFile.id) } : null,
+      notes: !!notesFile,
       heldFiles: heldList
     };
     if (a.toMatch || a.scans) a.paper = true;
@@ -3076,6 +3085,35 @@ function keyFiles_(folder) {
 
 function readyFolderFor_(run) { return folderByName_(folders_().ready, run); }
 
+/* ---------- version 23: notes for Rowan and a blank copy of the test ---------- */
+const NOTES_PREFIX = 'Grading notes - ';
+const BLANK_PREFIX = 'Blank test - ';
+function filesMatching_(folder, re) {
+  const out = [];
+  const it = folder.getFiles();
+  while (it.hasNext()) { const fl = it.next(); if (!fl.isTrashed() && re.test(fl.getName())) out.push(fl); }
+  return out;
+}
+/** The test's notes for Rowan (text) and its blank copy, if any. Through rpc. */
+function webGetNotes(run) {
+  const fo = readyFolderFor_(String(run || '').trim());
+  const n = filesMatching_(fo, /^grading notes/i)[0];
+  const b = filesMatching_(fo, /^blank test/i)[0];
+  return { text: n ? n.getBlob().getDataAsString('UTF-8') : '', blank: b ? { name: b.getName(), url: b.getUrl() } : null };
+}
+/** Saves (or clears) the notes for Rowan. Through rpc. */
+function webSaveNotes(run, text) {
+  run = String(run || '').trim();
+  if (!run) return { ok: false, error: 'Which test are these notes for?' };
+  const fo = readyFolderFor_(run);
+  filesMatching_(fo, /^grading notes/i).forEach(fl => fl.setTrashed(true));
+  text = String(text || '').trim();
+  if (!text) { log_(run, '-', 'Grading notes removed', 'In the app.'); return { ok: true, text: 'Notes removed.' }; }
+  fo.createFile(NOTES_PREFIX + run.replace(/[\/\\]/g, '-') + '.txt', text, MimeType.PLAIN_TEXT);
+  log_(run, '-', 'Grading notes saved', 'In the app.');
+  return { ok: true, text: 'Notes saved. Rowan reads them before grading, and they win over the key.' };
+}
+
 /** Saves typed answers as the test's answer key (replacing any earlier key). */
 function webSaveKeyText(run, text) {
   run = String(run || '').trim();
@@ -3101,11 +3139,12 @@ function webRemoveKey(run) {
 function webUploadStart(kind, run, name, mime, size) {
   run = String(run || '').trim();
   if (!run) throw new Error('Which test is this for?');
-  if (kind !== 'scan' && kind !== 'key') throw new Error('Unknown upload.');
+  if (kind !== 'scan' && kind !== 'key' && kind !== 'blank') throw new Error('Unknown upload.');
   const f = folders_();
   const parent = kind === 'scan' ? folderByName_(f.inbox, run + SCAN_SUFFIX) : folderByName_(f.ready, run);
   const ext = (String(name).match(/\.[A-Za-z0-9]+$/) || [''])[0].toLowerCase();
   const fileName = kind === 'key' ? KEY_PREFIX + run.replace(/[\/\\]/g, '-') + ext
+    : kind === 'blank' ? BLANK_PREFIX + run.replace(/[\/\\]/g, '-') + ext
     : String(name || 'scan.pdf').replace(/[\/\\]/g, '-');
   const resp = UrlFetchApp.fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id', {
     method: 'post', contentType: 'application/json; charset=UTF-8', muteHttpExceptions: true,
@@ -3135,6 +3174,10 @@ function webUploadChunk(token, start, b64) {
   if (s.kind === 'key') {
     keyFiles_(DriveApp.getFolderById(s.parent)).forEach(fl => { if (fl.getId() !== id) fl.setTrashed(true); });
     log_(s.run, '-', 'Answer key saved', 'Uploaded in the app.');
+  }
+  if (s.kind === 'blank') {   // version 23: one blank test at a time
+    filesMatching_(DriveApp.getFolderById(s.parent), /^blank test/i).forEach(fl => { if (fl.getId() !== id) fl.setTrashed(true); });
+    log_(s.run, '-', 'Blank test saved', 'Uploaded in the app.');
   }
   return { done: true };
 }
@@ -4221,6 +4264,34 @@ function uploadFile(kind, run, file, progress){
 function bar(d){ var b = el('div'); b.style.cssText = 'height:10px;background:var(--soft);border-radius:5px;overflow:hidden;margin:10px 0'; var i = el('i'); i.style.cssText = 'display:block;height:100%;width:0;background:var(--green);transition:width .2s'; b.appendChild(i); d.appendChild(b); return i; }
 
 /* Upload the class scan (and, if you like, the answer key) for a paper test */
+/* Version 23: notes for Rowan and a blank copy of the test, used by both windows */
+var NL = String.fromCharCode(10);
+function notesFields(d, run){
+  d.appendChild(el('label', '', 'Blank test (optional): helps Rowan see how many parts each question has'));
+  var bf = el('input'); bf.type = 'file'; bf.accept = '.pdf,.doc,.docx,image/*'; d.appendChild(bf);
+  var saved = el('p', ''); saved.style.cssText = 'margin:4px 0 0;color:var(--muted);font-size:13px'; d.appendChild(saved);
+  d.appendChild(el('label', '', 'Notes for Rowan: how you want it graded (these win over the key)'));
+  var nt = el('textarea'); nt.rows = 5;
+  nt.placeholder = ['Grade leniently.', 'Q4 has two parts, 1 point each.', 'Q6: if part a is wrong but b uses it right, b gets full credit.', 'Q9: accept either answer.'].join(NL);
+  d.appendChild(nt);
+  var loaded = '';
+  call('rpc', 'webGetNotes', [run]).then(function(r){
+    if (!r) return;
+    loaded = r.text || ''; if (!nt.value) nt.value = loaded;
+    if (r.blank) { saved.textContent = 'Saved: '; var l = el('a', '', r.blank.name); l.href = r.blank.url; l.target = '_blank'; saved.appendChild(l); saved.appendChild(document.createTextNode(' (a new one replaces it)')); }
+  }).catch(function(){});
+  return {
+    blankFile: function(){ return bf.files[0] || null; },
+    /* uploads the blank (if picked) and saves the notes (if changed); returns what was done */
+    save: function(onStep){
+      var done = [], chain = Promise.resolve();
+      if (bf.files[0]) chain = chain.then(function(){ onStep && onStep('Uploading the blank test...'); return uploadFile('blank', run, bf.files[0], function(){}).then(function(){ done.push('blank test saved'); }); });
+      if (nt.value.trim() !== loaded.trim()) chain = chain.then(function(){ onStep && onStep('Saving your notes...'); return call('rpc', 'webSaveNotes', [run, nt.value]).then(function(r){ if (!r || !r.ok) throw new Error((r && r.error) || 'Notes not saved.'); done.push(nt.value.trim() ? 'notes saved' : 'notes removed'); }); });
+      return chain.then(function(){ return done; });
+    }
+  };
+}
+
 function uploadScan(run){
   var d = openDialog('Upload the class scan: ' + run);
   d.appendChild(el('p', '', 'Pick the scan of the whole class. One big PDF is fine; several PDFs or phone pictures work too.'));
@@ -4229,6 +4300,7 @@ function uploadScan(run){
   var kf = el('input'); kf.type = 'file'; kf.accept = '.pdf,.doc,.docx,.txt,image/*'; d.appendChild(kf);
   d.appendChild(el('p', '', 'or type it:')).style.cssText = 'margin:8px 0 4px;color:var(--muted)';
   var kt = el('textarea'); kt.rows = 4; kt.placeholder = '1 B\\n2 C\\n3 The Moon’s gravity pulls the ocean (2 points)'; d.appendChild(kt);
+  var nf = notesFields(d, run);
   var err = el('div', 'err'); d.appendChild(err);
   var fill = bar(d); fill.parentNode.style.display = 'none';
   var row = buttons(d, [{ label: 'Cancel', fn: closeDialog }, { label: 'Upload and read the pages', cls: 'go', fn: function(){
@@ -4241,13 +4313,14 @@ function uploadScan(run){
     files.forEach(function(x, i){ chain = chain.then(function(){ err.textContent = 'Uploading ' + x.name + ' (' + (i + 1) + ' of ' + files.length + ')...'; var base = doneBytes; return uploadFile('scan', run, x, function(n){ fill.style.width = (100 * (base + n) / total) + '%'; }).then(function(){ doneBytes = base + x.size; }); }); });
     if (kf.files[0]) chain = chain.then(function(){ err.textContent = 'Uploading the answer key...'; var base = doneBytes; return uploadFile('key', run, kf.files[0], function(n){ fill.style.width = (100 * (base + n) / total) + '%'; }); });
     else if (kt.value.trim()) chain = chain.then(function(){ return call('webSaveKeyText', run, kt.value); });
+    chain = chain.then(function(){ return nf.save(function(t){ err.textContent = t; }); });
     chain.then(function(){ clean(); }).catch(function(e){ err.style.color = ''; err.textContent = 'Upload stopped: ' + errText(e); row.querySelectorAll('button').forEach(function(b){ b.disabled = false; }); });
   } }]);
 }
 
 /* See, add, replace or remove a test's answer key */
 function keyDialog(a){
-  var d = openDialog('Answer key: ' + a.run);
+  var d = openDialog('Answer key and notes: ' + a.run);
   if (a.key) {
     var p = el('p'); p.appendChild(document.createTextNode('Saved: ')); var l = el('a', '', a.key.name); l.href = a.key.url; l.target = '_blank'; p.appendChild(l); d.appendChild(p);
     d.appendChild(el('p', '', 'Adding a new one below replaces it.')).style.color = 'var(--muted)';
@@ -4258,13 +4331,21 @@ function keyDialog(a){
   var kf = el('input'); kf.type = 'file'; kf.accept = '.pdf,.doc,.docx,.txt,image/*'; d.appendChild(kf);
   d.appendChild(el('label', '', 'or type the answers'));
   var kt = el('textarea'); kt.rows = 6; kt.placeholder = '1 B\\n2 C\\n3 The Moon’s gravity pulls the ocean (2 points)'; d.appendChild(kt);
+  d.appendChild(el('hr'));
+  var nf = notesFields(d, a.run);
   var err = el('div', 'err'); d.appendChild(err);
   var list = [{ label: 'Cancel', fn: closeDialog }];
   if (a.key) list.unshift({ label: 'Remove key', cls: 'danger', fn: function(){ call('webRemoveKey', a.run).then(function(r){ showResult('Answer key', r); }).catch(fail('Answer key')); } });
-  list.push({ label: 'Save key', cls: 'go', fn: function(){
-    if (kf.files[0]) { err.style.color = 'var(--muted)'; err.textContent = 'Uploading...'; uploadFile('key', a.run, kf.files[0], function(){}).then(function(){ showResult('Answer key', { ok: true, text: 'Answer key saved for "' + a.run + '". Rowan will use it when you say "grade."' }); }).catch(function(e){ err.style.color = ''; err.textContent = errText(e); }); return; }
-    if (!kt.value.trim()) { err.textContent = 'Pick a file or type the answers first.'; return; }
-    call('webSaveKeyText', a.run, kt.value).then(function(r){ showResult('Answer key', r); }).catch(fail('Answer key'));
+  list.push({ label: 'Save', cls: 'go', fn: function(){
+    err.style.color = 'var(--muted)';
+    var done = [], chain = Promise.resolve();
+    if (kf.files[0]) chain = chain.then(function(){ err.textContent = 'Uploading the key...'; return uploadFile('key', a.run, kf.files[0], function(){}).then(function(){ done.push('answer key saved'); }); });
+    else if (kt.value.trim()) chain = chain.then(function(){ return call('webSaveKeyText', a.run, kt.value).then(function(r){ if (!r || !r.ok) throw new Error((r && r.error) || 'Key not saved.'); done.push('answer key saved'); }); });
+    chain.then(function(){ return nf.save(function(t){ err.textContent = t; }); }).then(function(more){
+      done = done.concat(more || []);
+      if (!done.length) { err.style.color = ''; err.textContent = 'Nothing changed. Pick a file, type the answers, or write notes first.'; return; }
+      var t = done.join(', '); showResult('Answer key and notes', { ok: true, text: t.charAt(0).toUpperCase() + t.slice(1) + ' for "' + a.run + '". Rowan reads all of it when you say "grade."' });
+    }).catch(function(e){ err.style.color = ''; err.textContent = errText(e); });
   } });
   buttons(d, list);
 }
@@ -4409,7 +4490,7 @@ function render(){
     var extra = [];
     if (a.coded || a.graded) extra.push(['See the work', function(){ openView('viewer', a.run, a.run); }]);
     if (a.checks) extra.push(['Look over ' + a.checks + ' flagged', function(){ openView('viewer', a.run, a.run); }]);
-    if (a.paper) extra.push([a.key ? 'Answer key \u2713' : 'Add answer key', function(){ keyDialog(a); }]);
+    if (a.paper) extra.push([(a.key || a.notes) ? 'Answer key and notes \u2713' : 'Add answer key and notes', function(){ keyDialog(a); }]);
     if (a.paper && a.next !== 'get') extra.push(['Upload more scans (make-ups)', function(){ uploadScan(a.run); }]);
     if (a.canvas && !a.paper && a.next !== 'get') extra.push(['Pull late work', function(){ pull(a.canvas); }]);
     if (a.review && a.next !== 'review') extra.push(['Review (' + a.review + ')', function(){ openView('review', 'Review what Rowan was not sure about'); }]);
