@@ -1,7 +1,7 @@
 {
-  "version": 25,
+  "version": 26,
   "date": "2026-11-04",
-  "notes": "Much faster: See the work and Match names load files straight from your Drive, and removing names saves several tests at once.",
+  "notes": "Square root curve button on each test card (raw and curved score both show in the feedback). Review choices and mark changes now update the score in the feedback too, and the app tells you when a test still has a question waiting.",
   "scopes": [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",

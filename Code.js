@@ -61,6 +61,19 @@
  *  is (the tool fills in the names it could read). The name area is painted
  *  white and the page saved as a flat picture, so the name is really gone.
  *  A test where a name still shows up is held back, NOT sent to Claude.
+ * Version 26 (2026-11-04): square root curve for tests. Each test's card has
+ *  "Square root curve". Every score becomes total x the square root of
+ *  (raw / total): 6.5/16 becomes 10.2/16, 12/16 becomes 13.9/16, 16/16 stays
+ *  16/16. Nobody goes down and order stays the same. The raw score is kept on
+ *  the Claude Grades Sheet (column F) and the feedback shows both ("Raw
+ *  6.5/16, curved to 10.2/16."). Review choices and mark changes still work:
+ *  they change the raw score and the curve follows. "Undo the curve" puts
+ *  the raw scores back. Typing a new score yourself takes that student off
+ *  the curve.
+ *  Also: when a Review choice or a mark you click changes a score, the
+ *  feedback's "6.5/16." and the question-by-question breakdown now change
+ *  with it (before, the comment kept Rowan's first number). After you click
+ *  a mark, the app tells you if that test still has a question waiting.
  * Version 25 (2026-11-04): much faster See the work and Match names.
  *  Your browser now downloads the files straight from your Drive, several at
  *  a time (before, each one went through the script one by one, turned into
@@ -192,7 +205,7 @@
  */
 
 const APP = 'Anonymizer';
-const APP_VERSION = 25;   // Version 17: the app compares this with the newest version from Rowan
+const APP_VERSION = 26;   // Version 17: the app compares this with the newest version from Rowan
 const TAB_ROSTER = 'Roster';
 const TAB_KEY = 'Key';
 const TAB_RESULTS = 'Results';
@@ -2380,7 +2393,7 @@ function reviewDecide(row, expect, points) {
     const before = num_(r[9]) !== null ? num_(r[9]) : (num_(r[4]) || 0);
     const delta = p - before;
 
-    let score = null, note = '';
+    let score = null, note = '', fb, rubric;
     const grades = claudeGradesSheet_();
     const data = grades.getDataRange().getValues();
     let at = -1;
@@ -2392,13 +2405,13 @@ function reviewDecide(row, expect, points) {
     } else if (num_(data[at][2]) === null) {
       note = 'The score in the Claude Grades Sheet is not a number, so it was not changed. Fix it there by hand.';
     } else {
-      score = Math.round((num_(data[at][2]) + delta) * 100) / 100;
-      if (delta !== 0) grades.getRange(at + 1, 3).setValue(score);
+      const moved = applyDelta_(grades, at + 1, data[at], delta, expect.question, p);   // version 26: feedback, breakdown and curve follow
+      score = moved.score; fb = moved.fb; rubric = moved.rubric;
     }
     const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MMM d, h:mm a');
     sh.getRange(row, 10, 1, 2).setValues([[p, stamp]]);
     SpreadsheetApp.flush();
-    return { eric: p, decided: stamp, score: score === null ? '' : String(score), note: note };
+    return { eric: p, decided: stamp, score: score === null ? '' : String(score), note: note, fb: fb, rubric: rubric };
   } finally {
     lock.releaseLock();
   }
@@ -2880,7 +2893,7 @@ function webStatusFast_() {
   const toMatch = {};
   scanRows.forEach(r => { if (r[0] && !planned[r[0] + '|' + String(r[1])]) toMatch[r[0]] = (toMatch[r[0]] || 0) + 1; });
 
-  const graded = {}, sig = {};
+  const graded = {}, sig = {}, testRows = {}, curvedRows = {};
   const book = claudeGradesBook_();
   const grades = book ? book.getSheets()[0] : null;
   if (grades) grades.getDataRange().getValues().slice(1).forEach(r => {
@@ -2889,6 +2902,8 @@ function webStatusFast_() {
     const run = String(r[0]).trim();
     (graded[run] = graded[run] || []).push(code);
     sig[code] = String(r[2]) + '||' + String(r[3] || '');
+    if (isTestRow_(r)) testRows[run] = (testRows[run] || 0) + 1;   // version 26
+    if (String(r[6] || '').trim() === CURVE_LABEL) curvedRows[run] = (curvedRows[run] || 0) + 1;
   });
   const sentSig = {};
   const res = ss_().getSheetByName(TAB_RESULTS);
@@ -2962,6 +2977,8 @@ function webStatusFast_() {
       checks: checksFor_(run, logRows, dismissedFor_(run)).filter(c => c.kind === 'missing' || !gradedSet[c.code]).length + (unmatchedCount[run] || 0),
       held: heldList.length,
       graded: g.length,
+      tests: testRows[run] || 0,
+      curved: curvedRows[run] || 0,
       review: waitingReview[run] || 0,
       toSend: g.filter(c => sentSig[c] !== sig[c]).length,
       canvas: saved[run] || '',
@@ -3000,7 +3017,7 @@ function webStatusSlow_() {
   const key = ss_().getSheetByName(TAB_KEY).getDataRange().getValues().slice(1);
   const runOf = {};
   key.forEach(r => { runOf[String(r[1])] = String(r[0]); });
-  const graded = {}, sig = {};
+  const graded = {}, sig = {}, testRows = {}, curvedRows = {};
   const grades = claudeGradesSheet_();
   if (grades) grades.getDataRange().getValues().slice(1).forEach(r => {
     const code = String(r[1]).trim();
@@ -3008,6 +3025,8 @@ function webStatusSlow_() {
     const run = String(r[0]).trim();
     (graded[run] = graded[run] || []).push(code);
     sig[code] = String(r[2]) + '||' + String(r[3] || '');
+    if (isTestRow_(r)) testRows[run] = (testRows[run] || 0) + 1;   // version 26
+    if (String(r[6] || '').trim() === CURVE_LABEL) curvedRows[run] = (curvedRows[run] || 0) + 1;
   });
   const sentSig = {};
   const res = ss_().getSheetByName(TAB_RESULTS);
@@ -3050,6 +3069,8 @@ function webStatusSlow_() {
       checks: checksFor_(run, logRows, dismissedFor_(run)).filter(c => c.kind === 'missing' || !gradedSet[c.code]).length + (unmatchedCount[run] || 0),
       held: doneFo ? filesIn_(doneFo, HELD_FOLDER) : 0,
       graded: g.length,
+      tests: testRows[run] || 0,
+      curved: curvedRows[run] || 0,
       review: waitingReview[run] || 0,
       toSend: g.filter(c => sentSig[c] !== sig[c]).length,
       canvas: saved[run] || '',
@@ -3572,6 +3593,11 @@ function webSaveGrade(run, code, score, fb) {
     for (let i = 1; i < data.length; i++) {
       if (String(data[i][0]).trim() === run && String(data[i][1]).trim() === code) {
         gs.getRange(i + 1, 3, 1, 2).setValues([[value, String(fb || '')]]);
+        // version 26: a score you type yourself takes this student off the curve
+        if (String(data[i][6] || '').trim() === CURVE_LABEL && String(value) !== String(data[i][2])) {
+          gs.getRange(i + 1, 7).setValue(CURVE_BY_HAND);
+          return { ok: true, text: 'Saved. You changed a curved score, so this student is off the curve now (your score stays as you typed it). It goes to Canvas the next time you click Send.' };
+        }
         return { ok: true, text: 'Saved. It goes to Canvas the next time you click Send.' };
       }
     }
@@ -3611,7 +3637,7 @@ function webOverrideMark(run, code, row, question, points) {
   const p = num_(points);
   if (p === null || p < 0 || (mp.possible !== null && p > mp.possible)) return { ok: false, error: 'Points have to be a number from 0 to ' + (mp.possible === null ? 'the points possible' : mp.possible) + '.' };
   const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MMM d, h:mm a');
-  let score = '';
+  let score = '', fb, rubric;
   // Is this question waiting (or decided) on the Review tab? Then this is the Review decision.
   const rv = book.getSheetByName(REVIEW_TAB);
   let reviewRow = -1;
@@ -3619,15 +3645,15 @@ function webOverrideMark(run, code, row, question, points) {
   if (reviewRow > 0) {
     const x = rv.getRange(reviewRow, 1, 1, 3).getValues()[0];
     const out = reviewDecide(reviewRow, { assignment: run, code: code, question: String(x[2]) }, p);
-    score = out.score;
+    score = out.score; fb = out.fb; rubric = out.rubric;
   } else {
     const before = mp.points === null ? 0 : mp.points;
     const grades = claudeGradesSheet_();
     const data = grades.getDataRange().getValues();
     for (let i = 1; i < data.length; i++) {
       if (String(data[i][0]).trim() === run && String(data[i][1]).trim() === code && num_(data[i][2]) !== null) {
-        score = String(Math.round((num_(data[i][2]) + p - before) * 100) / 100);
-        grades.getRange(i + 1, 3).setValue(Number(score));
+        const moved = applyDelta_(grades, i + 1, data[i], p - before, question, p);   // version 26: feedback, breakdown and curve follow
+        score = String(moved.score); fb = moved.fb; rubric = moved.rubric;
         break;
       }
     }
@@ -3635,7 +3661,148 @@ function webOverrideMark(run, code, row, question, points) {
   const possible = mp.possible;
   const kind = possible !== null && p === possible ? 'check' : p === 0 ? 'x' : 'partial';
   sh.getRange(Number(row), 6, 1, 6).setValues([[kind, kind === 'partial' ? p + '/' + possible : '', String(question), p, possible === null ? '' : possible, stamp]]);
-  return { ok: true, mark: kind, text: kind === 'partial' ? p + '/' + possible : '', points: p, possible: possible, score: score, changed: stamp };
+  return { ok: true, mark: kind, text: kind === 'partial' ? p + '/' + possible : '', points: p, possible: possible, score: score, changed: stamp, fb: fb, rubric: rubric };
+}
+
+/* ---------- version 26: square root curve for tests ---------- */
+/*
+ * Claude Grades Sheet, grades tab: column F keeps the raw score, column G says "Square root" for a curved row
+ * (or "Changed by you" once you typed your own score). Score (column C) is the curved score, which is what
+ * Send puts in Canvas. Curved score = total x square root of (raw / total), to one decimal.
+ */
+const CURVE_LABEL = 'Square root';
+const CURVE_BY_HAND = 'Changed by you';
+const CURVE_PREFIX_RE = /^\s*(?:Raw\s+[0-9.]+\s*\/\s*[0-9.]+\s*,\s*curved to\s+[0-9.]+\s*\/\s*[0-9.]+\s*\.\s*|[0-9.]+\s*\/\s*[0-9.]+\s*\.\s*)/i;
+
+/** A test row's points possible: the sum of "/n" in the rubric breakdown ("Q1 1/1, Q2 0.5/2"), else the "x/total" at the start of the feedback. */
+function curveTotal_(r) {
+  const parts = String(r[4] || '').match(/[0-9.]+\s*\/\s*[0-9.]+/g);
+  if (parts && /^\s*Q\d+/i.test(String(r[4]))) {
+    const t = parts.reduce((s, x) => s + Number(x.split('/')[1]), 0);
+    if (t > 0) return Math.round(t * 100) / 100;
+  }
+  const m = String(r[3] || '').match(/^\s*(?:Raw\s+)?[0-9.]+\s*\/\s*([0-9.]+)/i);
+  return m && Number(m[1]) > 0 ? Number(m[1]) : null;
+}
+
+/** Is this grades-tab row a test (question-by-question breakdown)? */
+function isTestRow_(r) { return /^\s*Q\d+\s+[0-9.]+\s*\/\s*[0-9.]+/i.test(String(r[4] || '')); }
+
+function sqrtCurve_(raw, total) {
+  raw = Math.max(0, Math.min(Number(raw) || 0, total));
+  return Math.round(total * Math.sqrt(raw / total) * 10) / 10;
+}
+
+function curveNum_(n) { return String(Math.round(Number(n) * 100) / 100); }
+
+/** Feedback with "Raw 6.5/16, curved to 10.2/16." in front (replacing "6.5/16." or an older curve line). */
+function curveFeedback_(fb, raw, curved, total) {
+  const rest = String(fb || '').replace(CURVE_PREFIX_RE, '');
+  return 'Raw ' + curveNum_(raw) + '/' + curveNum_(total) + ', curved to ' + curveNum_(curved) + '/' + curveNum_(total) + '.' + (rest ? ' ' + rest : '');
+}
+
+/** Feedback back to "6.5/16. ..." */
+function uncurveFeedback_(fb, raw, total) {
+  const rest = String(fb || '').replace(CURVE_PREFIX_RE, '');
+  return curveNum_(raw) + '/' + curveNum_(total) + '.' + (rest ? ' ' + rest : '');
+}
+
+/** The breakdown with one question's points changed ("Q10 0.5/1 (Review)" -> "Q10 1/1"). question like "Q10 Arrows..." or "Q10". */
+function breakdownSet_(text, question, points) {
+  const q = qKey_(question);
+  if (!/^q\d+$/.test(q)) return String(text || '');
+  const re = new RegExp('(^|,\\s*)(' + q + ')\\s+[0-9.]+\\s*/\\s*([0-9.]+)(?:\\s*\\(Review\\))?', 'i');
+  return String(text || '').replace(re, (m, pre, name, poss) => pre + name + ' ' + curveNum_(points) + '/' + poss);
+}
+
+/** A question's points in the breakdown, or null. */
+function breakdownGet_(text, question) {
+  const q = qKey_(question);
+  if (!/^q\d+$/.test(q)) return null;
+  const m = String(text || '').match(new RegExp('(?:^|,\\s*)' + q + '\\s+([0-9.]+)\\s*/', 'i'));
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * Moves one grades-tab row's score by delta points (a Review choice or a mark you changed). rowNum is the
+ * Sheet row (1-based), r that row's values, question (optional) the question that changed and points its new points.
+ * Version 26: the feedback's "6.5/16." and the breakdown move with the score (before, the comment kept the
+ * old number). On a curved row the raw score moves and the curved score follows.
+ * Returns { score, fb, rubric }.
+ */
+function applyDelta_(grades, rowNum, r, delta, question, points) {
+  let rubric = String(r[4] || '');
+  if (question && points !== undefined && points !== null) rubric = breakdownSet_(rubric, question, points);
+  const total = isTestRow_(r) ? curveTotal_(r) : null;
+  if (String(r[6] || '').trim() === CURVE_LABEL && num_(r[5]) !== null && total) {
+    const raw = Math.max(0, Math.round((num_(r[5]) + delta) * 100) / 100);
+    const curved = sqrtCurve_(raw, total);
+    const fb = curveFeedback_(r[3], raw, curved, total);
+    grades.getRange(rowNum, 3, 1, 4).setValues([[curved, fb, rubric, raw]]);
+    return { score: curved, fb: fb, rubric: rubric };
+  }
+  const score = Math.round((num_(r[2]) + delta) * 100) / 100;
+  let fb = String(r[3] || '');
+  if (total && String(r[6] || '').trim() !== CURVE_BY_HAND && /^\s*[0-9.]+\s*\/\s*[0-9.]+\s*\./.test(fb)) fb = uncurveFeedback_(fb, score, total);
+  grades.getRange(rowNum, 3, 1, 3).setValues([[score, fb, rubric]]);
+  return { score: score, fb: fb, rubric: rubric };
+}
+
+/**
+ * The card's "Square root curve" button. on = true curves every graded test row for this assignment;
+ * on = false puts the raw scores back. Through rpc.
+ */
+function webCurveTest(run, on) {
+  run = String(run || '');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const gs = claudeGradesSheet_();
+    if (!gs) return { ok: false, error: 'The Claude Grades Sheet could not be found.' };
+    const head = gs.getRange(1, 6, 1, 2).getValues()[0];
+    if (!String(head[0]).trim() && !String(head[1]).trim()) gs.getRange(1, 6, 1, 2).setValues([['Raw score (before curve)', 'Curve']]);
+    const data = gs.getRange(1, 1, gs.getLastRow(), 7).getValues();
+    let changed = 0, skipped = 0, byHand = 0, already = 0, low = null, high = null;
+    for (let i = 1; i < data.length; i++) {
+      const r = data[i];
+      if (String(r[0]).trim() !== run || !String(r[1]).trim()) continue;
+      const tag = String(r[6] || '').trim();
+      if (on) {
+        if (tag === CURVE_LABEL) { already++; continue; }
+        if (tag === CURVE_BY_HAND) { byHand++; continue; }
+        const raw = num_(r[2]), total = curveTotal_(r);
+        if (raw === null || !total || !isTestRow_(r)) { skipped++; continue; }
+        const curved = sqrtCurve_(raw, total);
+        gs.getRange(i + 1, 3, 1, 5).setValues([[curved, curveFeedback_(r[3], raw, curved, total), r[4], raw, CURVE_LABEL]]);
+        changed++;
+        low = low === null ? curved / total : Math.min(low, curved / total);
+        high = high === null ? curved / total : Math.max(high, curved / total);
+      } else {
+        if (tag !== CURVE_LABEL) { if (tag === CURVE_BY_HAND) byHand++; continue; }
+        const raw = num_(r[5]), total = curveTotal_(r);
+        if (raw === null || !total) { skipped++; continue; }
+        gs.getRange(i + 1, 3, 1, 5).setValues([[raw, uncurveFeedback_(r[3], raw, total), r[4], '', '']]);
+        changed++;
+      }
+    }
+    SpreadsheetApp.flush();
+    log_(run, '-', on ? 'Square root curve' : 'Curve undone', changed + ' score(s) ' + (on ? 'curved' : 'put back to raw') + ' in the app.');
+    const extra = [];
+    if (already) extra.push(already + ' were already curved.');
+    if (byHand) extra.push(byHand + ' you changed by hand ' + (byHand === 1 ? 'was' : 'were') + ' left as you typed ' + (byHand === 1 ? 'it' : 'them') + '.');
+    if (skipped) extra.push(skipped + ' had no question-by-question score, so ' + (skipped === 1 ? 'it was' : 'they were') + ' left alone.');
+    let text;
+    if (on) {
+      text = changed ? 'Curved ' + changed + ' score' + (changed === 1 ? '' : 's') + '. Curved grades now run from ' + Math.round(low * 100) + '% to ' + Math.round(high * 100) + '%. Each student\'s feedback shows the raw score and the curved one. Click Send to put them in Canvas.'
+        : 'Nothing new to curve.';
+    } else {
+      text = changed ? 'Put ' + changed + ' score' + (changed === 1 ? '' : 's') + ' back to the raw score. Canvas never lowers a grade it already has, so if the curved grades were sent, change those in Canvas by hand.'
+        : 'Nothing was curved, so nothing changed.';
+    }
+    return { ok: true, text: text + (extra.length ? ' ' + extra.join(' ') : ''), changed: changed };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function webDismissCheck(run, code, file) {
@@ -4111,11 +4278,13 @@ function override(pg, code, num, m, d){
       m.mark = r.mark; m.text = r.text; m.points = r.points; m.possible = r.possible; m.changed = r.changed;
       (D.review[code] || []).forEach(function(q){ if (String(q.question).trim().split(/[ .:)]/)[0].toLowerCase() === String(m.question).trim().split(/[ .:)]/)[0].toLowerCase()) q.eric = r.points; });
       if (r.score !== '' && D.grades[code]) { D.grades[code].score = r.score; D.grades[code].sent = 'Changed since it was sent (Send again)'; }
+      if (D.grades[code] && typeof r.fb === 'string') { D.grades[code].fb = r.fb; D.grades[code].rubric = r.rubric || D.grades[code].rubric; }   // version 26
       pop.remove();
       Array.prototype.slice.call(pg.querySelectorAll('.mk')).forEach(function(x){ x.remove(); });
       addMarks(pg, code, num);
       renderList(); side(shown[at]);
-      alertMsg(m.question + ' changed. ' + code + ' is now ' + (D.grades[code] ? D.grades[code].score : '') + '.');
+      var left = (D.review[code] || []).filter(function(q){ return q.eric === null; }).map(function(q){ return String(q.question).trim().split(/[ .:)]/)[0]; });   // version 26
+      alertMsg(m.question + ' changed. ' + code + ' is now ' + (D.grades[code] ? D.grades[code].score : '') + '.' + (left.length ? ' Still waiting on this test: ' + left.join(', ') + ' (the amber ? mark).' : ''));
     }).catch(function(e){ note.textContent = errText(e); });
   }
 }
@@ -4466,6 +4635,29 @@ function uploadScan(run){
 }
 
 /* See, add, replace or remove a test's answer key */
+/* Version 26: square root curve */
+function curveDialog(a){
+  var d = openDialog('Square root curve: ' + a.run);
+  if (a.curved) {
+    d.appendChild(el('p', '', a.curved + ' score' + (a.curved === 1 ? ' is' : 's are') + ' curved. Each student\u2019s feedback shows the raw score and the curved one.'));
+    d.appendChild(el('p', '', 'Undo puts the raw scores back. Canvas never lowers a grade it already has, so if the curved grades were sent, change those in Canvas by hand.'));
+    var list = [{ label: 'Cancel', fn: closeDialog }];
+    if (a.curved < a.tests) list.push({ label: 'Curve the rest', fn: function(){ runCurve(a, true); } });
+    list.push({ label: 'Undo the curve', cls: 'danger', fn: function(){ runCurve(a, false); } });
+    buttons(d, list);
+    return;
+  }
+  d.appendChild(el('p', '', 'Each score becomes the total times the square root of (score \u00f7 total). Low scores go up the most, nobody goes down, the order stays the same, and only a perfect score is 100%.'));
+  var t = el('p'); t.style.color = 'var(--muted)';
+  t.textContent = 'Out of 16: 4 becomes 8 (25% to 50%), 6.5 becomes 10.2 (41% to 64%), 12 becomes 13.9 (75% to 87%), 16 stays 16.';
+  d.appendChild(t);
+  d.appendChild(el('p', '', 'The feedback shows both, like \u201cRaw 6.5/16, curved to 10.2/16.\u201d Review choices and mark changes still work after the curve: they change the raw score and the curve follows. You can undo it any time before you send.'));
+  buttons(d, [{ label: 'Cancel', fn: closeDialog }, { label: 'Curve ' + a.tests + ' score' + (a.tests === 1 ? '' : 's'), cls: 'go', fn: function(){ runCurve(a, true); } }]);
+}
+function runCurve(a, on){
+  busy('Square root curve', on ? 'Curving...' : 'Putting the raw scores back...');
+  call('rpc', 'webCurveTest', [a.run, on]).then(function(r){ showResult('Square root curve', r); }).catch(fail('Square root curve'));
+}
 function keyDialog(a){
   var d = openDialog('Answer key and notes: ' + a.run);
   if (a.key) {
@@ -4668,6 +4860,7 @@ function render(){
     if (a.checks) extra.push(['Look over ' + a.checks + ' flagged', function(){ openView('viewer', a.run, a.run); }]);
     if (a.paper) extra.push([(a.key || a.notes) ? 'Answer key and notes \u2713' : 'Add answer key and notes', function(){ keyDialog(a); }]);
     if (a.paper && a.next !== 'get') extra.push(['Upload more scans (make-ups)', function(){ uploadScan(a.run); }]);
+    if (a.tests) extra.push([a.curved ? 'Square root curve \u2713' : 'Square root curve', function(){ curveDialog(a); }]);   // version 26
     if (a.canvas && !a.paper && a.next !== 'get') extra.push(['Pull late work', function(){ pull(a.canvas); }]);
     if (a.review && a.next !== 'review') extra.push(['Review (' + a.review + ')', function(){ openView('review', 'Review what Rowan was not sure about'); }]);
     if ((a.toSend || a.graded) && a.next !== 'send') extra.push([a.toSend ? 'Send to Canvas' : 'Send to Canvas again', function(){ send(a); }]);
